@@ -78,7 +78,7 @@ def load_model(site=SITE, path=None):
     lat = la1 - (np.arange(H) + .5) * (la1 - la0) / H
     lon = lo0 + (np.arange(W) + .5) * (lo1 - lo0) / W
     return {"snow": snow, "elev": elev, "times": times, "lat": lat, "lon": lon, "version": lj.get("version"),
-            "generated": lj.get("generated"), "settle": settle}
+            "generated": lj.get("generated"), "settle": settle, "meta": m, "blob": b}
 
 
 def sm_window(sm, t0, t1):

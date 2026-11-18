@@ -1,0 +1,80 @@
+# Collects validation data twice a day and keeps it on the branch «data»:
+#   data/obs/<source>/<var>/<day>.csv.gz   point values (SLF maps, IMIS, snow-forecast.com, gipfelbuch)
+#   data/gipfelbuch/reports_<month>.jsonl  the parsed gipfelbuch reports
+# IMIS only offers the last 24 h, so the twice-daily run is what builds its history.
+name: Collect validation data
+
+on:
+  schedule:
+    - cron: "17 7 * * *"
+    - cron: "47 18 * * *"
+  workflow_dispatch:
+    inputs:
+      days_back:
+        description: "SLF maps: days to re-read (backfill)"
+        default: "2"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: collect
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      MODEL_SITE: ${{ secrets.MODEL_SITE }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+
+      - name: Data so far
+        run: |
+          if git fetch -q --depth 1 origin data 2>/dev/null; then
+            git archive FETCH_HEAD data | tar -x
+          fi
+          mkdir -p data
+
+      - name: Random start offset
+        if: github.event_name == 'schedule'
+        run: sleep $(( RANDOM % 900 ))
+
+      - name: Snow maps, stations, resorts
+        env:
+          SLF_HS_URL: ${{ vars.SLF_HS_URL }}
+        run: python scrape_snowmaps.py --data data --days-back "${{ github.event.inputs.days_back || '2' }}"
+
+      - name: gipfelbuch.ch reports
+        if: always()
+        env:
+          GIPFELBUCH_EMAIL: ${{ secrets.GIPFELBUCH_EMAIL }}
+          GIPFELBUCH_PASSWORD: ${{ secrets.GIPFELBUCH_PASSWORD }}
+        run: python scrape_gipfelbuch.py --data data --since-days 3
+
+      - name: Compare with the model
+        if: always() && env.MODEL_SITE != ''
+        run: |
+          python validate_obs.py --data data --out val --since "$(date -u -d '-30 days' +%F)"
+          cat val/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Store on branch data
+        if: always()
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -rf store && mkdir store && cd store && git init -q
+          git remote add origin "$(git -C .. remote get-url origin)"
+          git config http.https://github.com/.extraheader "$(git -C .. config --get http.https://github.com/.extraheader)"
+          if git fetch -q --depth 1 origin data 2>/dev/null; then git checkout -q -b data FETCH_HEAD; else git checkout -q --orphan data; fi
+          rm -rf data && cp -r ../data data
+          if [ -d ../val ]; then mkdir -p validation && cp ../val/report.md validation/latest.md; fi
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -q -m "collect $(date -u +%F\ %H:%M)"
+          git push -q origin HEAD:data

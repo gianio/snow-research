@@ -38,3 +38,51 @@ Optionen: `--pg-run 20261117`, `--pg-day DAY072` (Standard `auto` = morgen), `--
 - Die Anfragen tragen eine neutrale Kennung; pro Lauf sind es ~5 Anfragen bei PowderGuide und 2 beim SLF.
 - PowderGuide-Kacheln sind für deren Karte gedacht; ein Wechsel auf ICON-EU direkt vom DWD (Open Data) wäre die saubere Alternative.
 - Ein Tag ist Zufall – erst über Wochen wird der Bias belastbar genug zum Kalibrieren.
+
+---
+
+# Validierungsdaten sammeln
+
+Zusätzlich zum täglichen Kartenvergleich sammeln drei Skripte Punktwerte (Koordinate, Zeit, Wert) aus vielen Quellen.
+Der Workflow *Collect validation data* (07:17 und 18:47 UTC, mit Zufallsverzögerung) legt sie auf dem Branch `data` ab.
+
+| Skript | Quelle | Grösse | Zeit |
+|---|---|---|---|
+| `scrape_snowmaps.py` | SLF/WhiteRisk Neuschneekarte HN1D/HN3D | `slf_hn/hn24`, `hn72` | gemessen, zurück bis `--days-back` |
+| | SLF Schneehöhenkarte (nur mit Variable `SLF_HS_URL`, Vorlage mit `{date}`) | `slf_hs/hs` | gemessen |
+| | SLF IMIS-Stationen (alle ~200) | `imis/hs`, `imis/ta` | gemessen, stündlich (API liefert nur 24 h → 2 Läufe/Tag) |
+| | snow-forecast.com, Orte in `config/snowforecast_resorts.txt` | `snowforecast/snow_period` (Prognose je Tagesdrittel, Berg/Mitte/Tal), `hs_reported` | Prognose + gemeldete Schneehöhe |
+| | PowderGuide ICON-D2/EU, ExoLabs (`--sources powderguide,exolabs`) | `hn24`, `hs` | **aus**: deren Kachel-Server sagt in robots.txt `Disallow: /` |
+| `scrape_gipfelbuch.py` | neue Verhältnisberichte auf gipfelbuch.ch (über die Sitemaps) | `surface_top/bottom`, `snowline_m`, `aper_below_m`, `ski_from_m`, `skidepot_m`, `snow_cm_new/total`, `avalanche_perception`, `rating` | Tourdatum, Koordinate des Routenpunkts |
+| `validate_obs.py` | alles oben gegen die nächste Modellzelle | Bias, MAE, RMSE, r, POD/FAR | |
+
+Punkte für Karten: Raster über der Schweiz (`--grid-km`, Standard 5 km, nur wo die SLF-Karte Daten hat) plus alle IMIS-Stationen –
+so liegen alle Kartenquellen auch genau an den Stationen vor.
+
+Format (`snowval/store.py`): `data/obs/<quelle>/<grösse>/<tag>.csv.gz` mit
+`source, var, kind, lat, lon, elev, valid_from, valid_to, issued, lead_h, value, unit, point_id, ref`.
+`python -m snowval.store --data data --db data/obs.sqlite` macht daraus eine SQLite-Tabelle.
+
+### gipfelbuch.ch
+Ohne Login zeigt die Seite 3 Berichte pro Besuch. Das Skript umgeht das nicht; mit eigenem (kostenlosem) Konto
+als Secrets `GIPFELBUCH_EMAIL` / `GIPFELBUCH_PASSWORD` liest es alle neuen Berichte, sonst die 3 neusten.
+Autor:innen werden nicht gespeichert. Die Texte sind deren Inhalte – Repo privat halten, nicht weitergeben.
+Der Login-Ablauf ist ohne Konto noch ungetestet: wenn er scheitert, meldet das Skript «the site asks for a login».
+
+### Unauffällig, aber anständig
+`snowval/net.py`: ein normaler Browser-Kopf (pro Lauf einer), Cookies, Referer der Seite, keine Angaben zu dir,
+zufällige Pausen (Seiten 2–8 s, Kacheln kürzer), Cache, Rückzug bei 429/5xx. Bewusst **nicht**: IP-/Proxy-Rotation,
+Captcha-Lösen, Sperren umgehen, robots.txt ignorieren. Pro Lauf ~25 Anfragen an SLF, ~60 an snow-forecast.com,
+und bei gipfelbuch.ch die Sitemaps plus eine pro neuem Bericht.
+
+### Einrichten
+- Secrets: `MODEL_SITE` (wie oben), optional `GIPFELBUCH_EMAIL`, `GIPFELBUCH_PASSWORD`.
+- Variable (optional): `SLF_HS_URL`.
+- Erster Lauf mit Rückblick: *Actions → Collect validation data → Run workflow*, `days_back` z. B. 30.
+
+```
+pip install -r requirements.txt
+python scrape_snowmaps.py --data data --days-back 7 --cache .cache
+python scrape_gipfelbuch.py --data data --since-days 7
+MODEL_SITE=https://… python validate_obs.py --data data --out val
+```
