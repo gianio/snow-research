@@ -1,0 +1,76 @@
+# Keeps every Snowmapper forecast run (the site only serves the newest).
+# Every 2 h: if latest.json names a run not archived yet, a compact copy
+# (archive_forecast.py) goes to the release «fc-archive-YYYY-MM» as an asset;
+# Variant A once per cycle. The index of what is archived lives on branch
+# «fc-archive» (index.json), the files themselves only as release assets.
+name: Archive forecasts
+
+on:
+  schedule:
+    - cron: "23 */2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fc-archive
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MODEL_SITE: ${{ secrets.MODEL_SITE }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Index so far
+        run: |
+          [ -n "$MODEL_SITE" ] || { echo "::error::Secret MODEL_SITE fehlt"; exit 1; }
+          mkdir -p archive
+          if git fetch -q --depth 1 origin fc-archive 2>/dev/null; then
+            git show FETCH_HEAD:index.json > archive/index.json 2>/dev/null || true
+          fi
+
+      - name: Archive new runs
+        run: python archive_forecast.py --out archive --index archive/index.json
+
+      - name: Upload to the month's release
+        run: |
+          [ -s archive/new_files.txt ] || { echo "nothing new"; exit 0; }
+          tag="fc-archive-$(date -u +%Y-%m)"
+          gh release view "$tag" >/dev/null 2>&1 || \
+            gh release create "$tag" --title "Forecast archive $(date -u +%Y-%m)" \
+              --notes "Compact Snowmapper / Variant A runs, see archive_forecast.py" --latest=false
+          while read -r f; do gh release upload "$tag" "$f" --clobber; done < archive/new_files.txt
+          python - "$tag" <<'PY'
+          import json, sys
+          p = "archive/index.json"; j = json.load(open(p))
+          names = {l.strip().split("/")[-1] for l in open("archive/new_files.txt") if l.strip()}
+          for v in j["files"].values():
+              if v["file"] in names:
+                  v["release"] = sys.argv[1]
+          json.dump(j, open(p, "w"), indent=1)
+          PY
+
+      - name: Save index on branch fc-archive
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -rf idx && mkdir idx && cd idx && git init -q
+          git remote add origin "$(git -C .. remote get-url origin)"
+          git config http.https://github.com/.extraheader "$(git -C .. config --get http.https://github.com/.extraheader)"
+          if git fetch -q --depth 1 origin fc-archive 2>/dev/null; then git checkout -q -b fc-archive FETCH_HEAD; else git checkout -q --orphan fc-archive; fi
+          cp ../archive/index.json index.json
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -q -m "archive $(date -u +%F\ %H:%M)"
+          git push -q origin HEAD:fc-archive
