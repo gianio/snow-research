@@ -86,3 +86,29 @@ python scrape_snowmaps.py --data data --days-back 7 --cache .cache
 python scrape_gipfelbuch.py --data data --since-days 7
 MODEL_SITE=https://… python validate_obs.py --data data --out val
 ```
+
+---
+
+# Snowmapper-Validierungscockpit (täglich)
+
+Workflow *Snowmapper validation cockpit* (täglich 08:53 UTC, nach der SLF-Neuschneekarte) baut eine HTML-Seite
+und legt sie als Artefakt `snowmapper-cockpit-<datum>` ab (`index.html` öffnen). Die Kennzahlen stehen zusätzlich in
+der Zusammenfassung des Laufs, der Verlauf auf dem Branch `cockpit` (`cockpit_history.csv`).
+
+| Teil | Inhalt |
+|---|---|
+| Neuschnee | SNOW-Layer gegen SLF HN1D für jeden vergangenen Tag des Laufs: Karten, Höhe, Region, Schwellen (POD/FAR/CSI) |
+| Kalibrierung | `calibrate_newsnow.py`: rechnet den Neuschnee mit anderer Regen/Schnee-Grenze, SLR, Geländefaktor und Niederschlagsfaktor neu; die beste Variante wird ohne den Prüftag gewählt |
+| Schneedecke | Variant A gegen IMIS aus dem Manifest: Bias je Station, Drift, Niederschlagsfaktor an den Grenzen |
+| Schneetyp | Variant A (ski6 + Wind) an der Koordinate jedes Gipfelbuch-Berichts gegen die gemeldete Oberfläche |
+| Punkte | `validate_obs.py` über alle gesammelten Quellen (Branch `data`) |
+
+Nötig: Secret `MODEL_SITE`. Für den Schneetyp-Teil zusätzlich der Workflow *Collect validation data*.
+In einem öffentlichen Repo speichert dieser nur die Fakten aus den Gipfelbuch-Berichten, keine Texte (`--no-text`).
+
+```
+MODEL_SITE=https://… python calibrate_newsnow.py --out calib
+MODEL_SITE=https://… python snowmapper_cockpit.py --data data --out cockpit
+```
+
+Plan für die nächsten Verbesserungen: [`docs/PLAN-neuschnee-schneetyp.md`](docs/PLAN-neuschnee-schneetyp.md)

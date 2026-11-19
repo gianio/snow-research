@@ -55,7 +55,8 @@ jobs:
         env:
           GIPFELBUCH_EMAIL: ${{ secrets.GIPFELBUCH_EMAIL }}
           GIPFELBUCH_PASSWORD: ${{ secrets.GIPFELBUCH_PASSWORD }}
-        run: python scrape_gipfelbuch.py --data data --since-days 3
+        # texts only in a private repository; a public one keeps the extracted facts
+        run: python scrape_gipfelbuch.py --data data --since-days 3 ${{ github.event.repository.private && ' ' || '--no-text' }}
 
       - name: Compare with the model
         if: always() && env.MODEL_SITE != ''

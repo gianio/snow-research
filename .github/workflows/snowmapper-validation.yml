@@ -1,0 +1,89 @@
+# Daily validation cockpit for Snowmapper.
+#   - new snow (SNOW layer) vs SLF HN1D for every past day of the current run
+#   - what-if calibration (rain/snow threshold, SLR, terrain, precipitation)
+#   - Variant A snow depth vs IMIS, drift, precipitation factor at its bounds
+#   - snow type (Variant A) vs gipfelbuch reports from branch «data»
+# Result: artifact «snowmapper-cockpit-<date>» (index.html, cockpit.json),
+# the key numbers in the run summary, and the history on branch «cockpit».
+name: Snowmapper validation cockpit
+
+on:
+  schedule:
+    - cron: "53 8 * * *"        # after the SLF HN1D map of the morning (06 UTC)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cockpit
+  cancel-in-progress: false
+
+jobs:
+  cockpit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MODEL_SITE: ${{ secrets.MODEL_SITE }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Check settings
+        run: |
+          if [ -z "$MODEL_SITE" ]; then
+            echo "::error::Secret MODEL_SITE fehlt (Adresse der Modell-Seite mit data/latest.json)"; exit 1
+          fi
+
+      - name: History and observations so far
+        run: |
+          if git fetch -q --depth 1 origin cockpit 2>/dev/null; then
+            git show FETCH_HEAD:cockpit_history.csv > cockpit_history.csv 2>/dev/null || true
+          fi
+          if git fetch -q --depth 1 origin data 2>/dev/null; then
+            git archive FETCH_HEAD data | tar -x
+          fi
+          mkdir -p data
+
+      - name: Point validation (all collected sources)
+        continue-on-error: true
+        run: python validate_obs.py --data data --out val --since "$(date -u -d '-30 days' +%F)"
+
+      - name: Cockpit
+        run: python snowmapper_cockpit.py --data data --val val --history cockpit_history.csv --out cockpit --cache .cache
+
+      - name: Summary
+        if: always()
+        run: test -f cockpit/summary.md && cat cockpit/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Date
+        id: d
+        run: echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snowmapper-cockpit-${{ steps.d.outputs.day }}
+          path: cockpit/
+          retention-days: 60
+
+      - name: Keep history on branch cockpit
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -rf hist && mkdir hist && cd hist && git init -q
+          git remote add origin "$(git -C .. remote get-url origin)"
+          git config http.https://github.com/.extraheader "$(git -C .. config --get http.https://github.com/.extraheader)"
+          if git fetch -q --depth 1 origin cockpit 2>/dev/null; then git checkout -q -b cockpit FETCH_HEAD; else git checkout -q --orphan cockpit; fi
+          cp ../cockpit_history.csv .
+          mkdir -p "days/${{ steps.d.outputs.day }}"
+          cp ../cockpit/cockpit.json ../cockpit/summary.md "days/${{ steps.d.outputs.day }}/"
+          cp ../cockpit/summary.md latest.md
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -q -m "cockpit ${{ steps.d.outputs.day }}"
+          git push -q origin HEAD:cockpit

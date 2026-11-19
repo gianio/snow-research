@@ -176,7 +176,7 @@ def snow_facts(r):
     return facts
 
 
-def to_obs(r):
+def to_obs(r, with_text=True):
     """Rows for the observation store from one parsed report."""
     if r["lat"] is None or not r["date"]:
         return {}
@@ -196,10 +196,10 @@ def to_obs(r):
         put("avalanche_perception", r["avalanche_perception"], "class", r.get("summit_elev"))
     if r.get("rating"):
         put("rating", r["rating"], "class", r.get("summit_elev"))
-    for f in snow_facts(r):
+    for f in r.get("facts") or snow_facts(r):
         # an elevation statement is a value AT that height: elev = value
         elev = f["value"] if f["unit"] == "m" else r.get("summit_elev")
-        put(f["var"], f["value"], f["unit"], elev, f["snippet"].replace("\n", " "))
+        put(f["var"], f["value"], f["unit"], elev, f["snippet"].replace("\n", " ") if with_text and f.get("snippet") else None)
     return out
 
 
@@ -225,6 +225,8 @@ def main():
     ap.add_argument("--max", type=int, default=300, help="at most this many reports per run")
     ap.add_argument("--delay", default="3,8", help="min,max seconds between report pages")
     ap.add_argument("--cache", default=None)
+    ap.add_argument("--no-text", action="store_true",
+                    help="store only the extracted facts, not the authors' texts (use this in a public repository)")
     a = ap.parse_args()
     lo, hi = (float(x) for x in a.delay.split(","))
     net = Polite(delay=(lo, hi), cache_dir=a.cache, cache_ttl_h=24 * 30)
@@ -269,9 +271,14 @@ def main():
             continue
         r["lastmod"] = t.isoformat()
         r["facts"] = snow_facts(r)
+        if a.no_text:
+            for k in ("description", "outlook", "Besonderes/Persönliches"):
+                r.pop(k, None)
+            for f in r["facts"]:
+                f.pop("snippet", None)
         reports.append(r)
         seen.add(rid)
-        for var, rows in to_obs(r).items():
+        for var, rows in to_obs(r, with_text=not a.no_text).items():
             obs.setdefault((var, r["date"]), []).extend(rows)
         print(f"  {r['date']} {r.get('activity') or activity_of(slug):<14} {r['summit']} ({r['summit_elev']} m)"
               f"  top={r.get('surface_top')}  facts={len(r['facts'])}")
