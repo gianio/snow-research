@@ -1,0 +1,72 @@
+# Weekly: build the training set from the LLM-labelled gipfelbuch reports and
+# the forecast archive, train the snow-surface model, and map today's run.
+# Stops with a summary (not an error) while there are too few labels.
+name: Snow-surface model
+
+on:
+  schedule:
+    - cron: "37 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "train even with few labels (for testing)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Labels (branch data)
+        run: |
+          git fetch -q --depth 1 origin data && git archive FETCH_HEAD data | tar -x || mkdir -p data
+          test -f data/labels/gipfelbuch_surfaces.csv && wc -l data/labels/gipfelbuch_surfaces.csv || echo "no labels yet"
+
+      - name: Forecast archive for the label months
+        run: |
+          mkdir -p archive
+          months=$( (test -f data/labels/gipfelbuch_surfaces.csv && tail -n +2 data/labels/gipfelbuch_surfaces.csv | cut -d, -f3 | cut -c1-7; date -u +%Y-%m) | sort -u)
+          for m in $months; do
+            gh release download "fc-archive-$m" -D archive --pattern '*.npz' --skip-existing 2>/dev/null || echo "no archive for $m"
+          done
+          ls archive | wc -l
+
+      - name: Dataset
+        run: python surface_model.py dataset --data data --archive archive | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Train
+        id: train
+        run: |
+          if python surface_model.py train --data data --out models/surface ${{ inputs.force && '--force' || '' }} > train.log 2>&1; then
+            cat models/surface/report.md >> "$GITHUB_STEP_SUMMARY"; echo "ok=1" >> "$GITHUB_OUTPUT"
+          else
+            { echo "### Noch kein Modell"; echo; cat train.log; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Map for today
+        if: steps.train.outputs.ok == '1'
+        run: python surface_model.py predict --archive archive --model models/surface --date "$(date -u +%F)" --out pred || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: surface-model-${{ github.run_id }}
+          path: |
+            models/surface/
+            pred/
+            data/training/surface.csv
+          retention-days: 90
+          if-no-files-found: ignore

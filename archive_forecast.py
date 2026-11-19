@@ -10,7 +10,7 @@ lost. This keeps, per run, what verification and training need:
             sunshine, cloud -- int16 in tenths (value = d_x / 10, -32768 = none)
     hourly  only for the first run of each UTC day ("day run"): SNOW, PREC, ABL
             uint8 exactly as in the blob, TEMP every 3 h
-    static  elevation, lat, lon, times, window ends, meta (scales, nsp, settle)
+    static  elevation, aspect, slope, lat, lon, times, window ends, meta (scales, nsp, settle)
 
   variant_a_<generated>.npz  (Variant A, once per cycle)
     class rasters (uint8, legend index) of ski6, ski18, wind, powder at
@@ -97,11 +97,19 @@ def archive_model(sm, out: Path, hourly=True):
         f, meta=json.dumps(meta), times=np.array([t.isoformat() for t in times]),
         window_end=np.array([e.isoformat() for e in kept]), lat=sm["lat"].astype(np.float32), lon=sm["lon"].astype(np.float32),
         elev=sm["elev"].astype(np.float32),
+        # cell aspect (deg) and slope (deg) of the 1 km grid, for applying trained models
+        aspect=(cube1(m, b, "MASPECT").astype(np.float32) * m.get("dir_div", 2.0)) if "MASPECT" in b else np.zeros(0),
+        slope=cube1(m, b, "MSLOPE").astype(np.float32) if "MSLOPE" in b else np.zeros(0),
         hourly=hourly,
         **({f"h_{k}": raw[k] for k in ("SNOW", "PREC", "ABL")} if hourly else {}),
         **({"h3_TEMP": raw["TEMP"][::3]} if hourly else {}),
         **{f"d_{k}": q10(np.array(v)) for k, v in daily.items()})
     return f
+
+
+def cube1(m, b, key):
+    H, W = m["height"], m["width"]
+    return np.frombuffer(base64.b64decode(b[key]), np.uint8)[:H * W].reshape(H, W)
 
 
 def png_classes(img, legend):

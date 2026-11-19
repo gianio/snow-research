@@ -38,7 +38,7 @@ import re
 import sys
 from pathlib import Path
 
-from snowval import store
+from snowval import llm_labels, store
 from snowval.net import Polite
 
 BASE = "https://www.gipfelbuch.ch"
@@ -227,9 +227,12 @@ def main():
     ap.add_argument("--cache", default=None)
     ap.add_argument("--no-text", action="store_true",
                     help="store only the extracted facts, not the authors' texts (use this in a public repository)")
+    ap.add_argument("--llm", default="auto", choices=["auto", "live", "fake", "off"],
+                    help="label each report with Claude (auto = if ANTHROPIC_API_KEY is set); fake = offline rules")
     a = ap.parse_args()
     lo, hi = (float(x) for x in a.delay.split(","))
     net = Polite(delay=(lo, hi), cache_dir=a.cache, cache_ttl_h=24 * 30)
+    L = llm_labels.labeler(a.llm, keep_evidence=not a.no_text)
 
     gdir = Path(a.data) / "gipfelbuch"
     gdir.mkdir(parents=True, exist_ok=True)
@@ -258,7 +261,7 @@ def main():
         todo = todo[-3:]
         print("  no GIPFELBUCH_EMAIL / GIPFELBUCH_PASSWORD: reading only the 3 newest (the site's limit without login)")
 
-    reports, obs = [], {}
+    reports, obs, label_rows, n_err = [], {}, [], 0
     for t, rid, slug, url in todo:
         try:
             page = net.get(url, referer=BASE + "/verhaeltnisse/uebersicht", cache=False).text
@@ -271,6 +274,14 @@ def main():
             continue
         r["lastmod"] = t.isoformat()
         r["facts"] = snow_facts(r)
+        if L is not None:                               # needs the text: before it is dropped below
+            lab = L(r)
+            r["llm"] = lab
+            if "error" in lab:
+                n_err += 1
+                print(f"  {rid}: LLM {lab['error']}", file=sys.stderr)
+            else:
+                label_rows += llm_labels.label_rows(r, lab)
         if a.no_text:
             for k in ("description", "outlook", "Besonderes/Persönliches"):
                 r.pop(k, None)
@@ -294,6 +305,11 @@ def main():
         old = store.load(a.data, "gipfelbuch", var, since=day, until=day)
         ids = {r["point_id"] for r in rows}
         store.write(a.data, "gipfelbuch", var, day, [o for o in old if o["point_id"] not in ids] + rows)
+
+    if label_rows:
+        llm_labels.write_label_rows(a.data, label_rows)
+    if L is not None:
+        print(f"LLM labels: {len(label_rows)} surfaces from {len(reports) - n_err} reports, {n_err} errors, usage {L.usage}")
 
     state["seen"] = sorted(seen)[-20000:]
     state["last_run"] = dt.datetime.now(dt.timezone.utc).isoformat()

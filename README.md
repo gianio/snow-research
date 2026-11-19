@@ -112,3 +112,38 @@ MODEL_SITE=https://… python snowmapper_cockpit.py --data data --out cockpit
 ```
 
 Plan für die nächsten Verbesserungen: [`docs/PLAN-neuschnee-schneetyp.md`](docs/PLAN-neuschnee-schneetyp.md)
+
+---
+
+# Prognose-Archiv
+
+Die Modell-Seite zeigt immer nur den neusten Lauf. Workflow *Archive forecasts* (alle 2 h) sichert jeden neuen Lauf
+kompakt (`archive_forecast.py`) als Datei im Release `fc-archive-JJJJ-MM`; das Verzeichnis liegt auf dem Branch `fc-archive`.
+
+| Datei | Inhalt | Grösse |
+|---|---|---|
+| `snowmapper_<lauf>.npz` | je Tag (06→06 UTC): Neuschnee, Niederschlag, Abbau, T mittel/min/max/bei Niederschlag, Wind, Sonne, Wolken; Höhe, Exposition, Neigung; beim ersten Lauf des Tages zusätzlich stündlich Neuschnee, Niederschlag, Abbau und 3-stündlich Temperatur | ~3.6 MB, Tageslauf ~10 MB |
+| `variant_a_<zyklus>.npz` | Klassenraster ski6, ski18, Wind, Pulver um 12 UTC jedes Tages + Manifest | ~2 MB |
+
+Etwa 4–5 GB pro Winter, ausserhalb des Git-Verlaufs.
+
+# Schneetyp-Modell aus LLM-Labels (Gipfelbuch)
+
+```
+neuer Bericht ─► scrape_gipfelbuch.py ─► Claude (snowval/llm_labels.py, festes JSON-Schema)
+                                          └► data/labels/gipfelbuch_surfaces.csv  (Fläche je Höhe/Exposition)
+Prognose-Archiv ─► surface_model.py dataset ─► train ─► predict (Oberflächenkarte)
+```
+
+- **Labels:** je Bericht Flächen mit Klasse (Pulver, windbeeinflusst, Triebschnee, Pressschnee, tragender/Bruchharsch,
+  Sulz, nass, hart, Piste, wenig/kein Schnee), Höhenbereich, Exposition, Sicherheit; dazu Schneegrenze, «Ski ab», Skidepot,
+  Neuschnee, Windeinfluss, Alarmzeichen. Autor:innen gehen nie an das Modell. Im öffentlichen Repo werden weder Texte
+  noch Zitate gespeichert.
+- **Live:** Secret `ANTHROPIC_API_KEY` setzen; dann beschriftet der Sammel-Workflow jeden neuen Bericht.
+  Lehnt das Modell eine Anfrage ab, übernimmt serverseitig ein anderes (`fallbacks: "default"`).
+- **Altbestand:** `label_reports.py submit` / `collect` über die Batch-API (halber Preis), nur für Berichte mit Text.
+- **Prüfen:** `label_reports.py review` zieht 200 Flächen zum Prüfen von Hand, `score` gibt die Trefferquote.
+  Das ist die Obergrenze dessen, was ein Modell auf diesen Labels erreichen kann.
+- **Modell:** Workflow *Snow-surface model* (wöchentlich). Gradient Boosting auf Snowmapper-Wetter der Vortage
+  (Temperaturen auf die Höhe des Labels umgerechnet) und den Variant-A-Klassen am Ort. Geprüft an späteren Tagen als
+  den Trainingstagen, verglichen mit der Variant-A-Regel und der häufigsten Klasse. Unter 300 Flächen trainiert es nicht.

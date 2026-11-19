@@ -55,6 +55,8 @@ jobs:
         env:
           GIPFELBUCH_EMAIL: ${{ secrets.GIPFELBUCH_EMAIL }}
           GIPFELBUCH_PASSWORD: ${{ secrets.GIPFELBUCH_PASSWORD }}
+          # with this secret every new report is labelled by Claude (snowval/llm_labels.py)
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         # texts only in a private repository; a public one keeps the extracted facts
         run: python scrape_gipfelbuch.py --data data --since-days 3 ${{ github.event.repository.private && ' ' || '--no-text' }}
 
