@@ -2,3 +2,6 @@ requests>=2.31
 numpy>=1.26
 pillow>=10
 matplotlib>=3.8
+anthropic>=2.10
+scikit-learn>=1.5
+joblib>=1.4

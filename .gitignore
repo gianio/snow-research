@@ -1,3 +1,7 @@
 out/
 __pycache__/
 *.pyc
+.cache/
+data/
+val/
+validate_out/
