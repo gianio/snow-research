@@ -5,3 +5,5 @@ __pycache__/
 data/
 val/
 validate_out/
+screencheck/inbox/
+screencheck/results/

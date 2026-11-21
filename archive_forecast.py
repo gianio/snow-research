@@ -14,7 +14,9 @@ lost. This keeps, per run, what verification and training need:
 
   variant_a_<generated>.npz  (Variant A, once per cycle)
     class rasters (uint8, legend index) of ski6, ski18, wind, powder at
-    12 UTC of every day in the cycle + the manifest
+    12 UTC of every day in the cycle, total snow height (hs_<tag>, byte =
+    cm x mul, 255 = failed run) of every SNOWPACK run at 06 and 18 UTC,
+    the pack layout (runs, weather points) and the manifest
 
 Files go to --out; the workflow uploads them as release assets
 (one release per month, tag fc-archive-YYYY-MM) and keeps an index.
@@ -147,8 +149,22 @@ def archive_va(net, site, out: Path, index):
                 print(f"  VA {layer} {tag}: {e}", file=sys.stderr)
                 continue
             arrays[f"{layer}_{tag[:10]}"] = png_classes(img, man["layers"][layer]["legend"])
+    # total snow height of every SNOWPACK run at 06 and 18 UTC (from the metric packs)
+    pack_meta = None
+    try:
+        pk = net.get(base + "pack/index.json", light=True, cache=False).json()
+        mi, okc = pk["mets"].index("total_hs_cm"), len(pk["mets"])
+        for tag in pk["tags"]:
+            if not tag.endswith(("T0600", "T1800")):
+                continue
+            img = np.asarray(Image.open(io.BytesIO(net.get(base + pk["file"].format(tag=tag), light=True).content)).convert("RGB"))
+            q = img.reshape(img.shape[0] * pk["runs_per_row"], pk["px_per_run"] * 3)[: len(pk["runs"])]
+            arrays[f"hs_{tag}"] = np.where(q[:, okc] > 0, q[:, mi], 255).astype(np.uint8)   # 255 = run failed
+        pack_meta = {k: pk[k] for k in ("mets", "mul", "runs", "wps", "slopes", "aspects", "elev_step", "neighbours", "d0_m")}
+    except Exception as e:                               # noqa: BLE001
+        print(f"  VA packs: {e}", file=sys.stderr)
     f = out / f"variant_a_{gen.replace(':', '').replace('-', '')}.npz"
-    np.savez_compressed(f, manifest=json.dumps(man), **arrays)
+    np.savez_compressed(f, manifest=json.dumps(man), pack_meta=json.dumps(pack_meta), **arrays)
     return key, f
 
 
