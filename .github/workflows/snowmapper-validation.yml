@@ -8,8 +8,9 @@
 name: Snowmapper validation cockpit
 
 on:
-  schedule:
-    - cron: "53 8 * * *"        # after the SLF HN1D map of the morning (06 UTC)
+  # Zeitplan vorerst ausgeschaltet (nur von Hand: Actions -> Run workflow).
+  # schedule:
+  #   - cron: "53 8 * * *"        # after the SLF HN1D map of the morning (06 UTC)
   workflow_dispatch:
 
 permissions:
