@@ -4,8 +4,9 @@
 name: Snow-surface model
 
 on:
-  schedule:
-    - cron: "37 5 * * 1"
+  # Zeitplan vorerst ausgeschaltet (nur von Hand: Actions -> Run workflow).
+  # schedule:
+  #   - cron: "37 5 * * 1"
   workflow_dispatch:
     inputs:
       force:

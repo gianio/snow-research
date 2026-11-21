@@ -6,8 +6,9 @@
 name: Archive forecasts
 
 on:
-  schedule:
-    - cron: "23 */2 * * *"
+  # Zeitplan vorerst ausgeschaltet (nur von Hand: Actions -> Run workflow).
+  # schedule:
+  #   - cron: "23 */2 * * *"
   workflow_dispatch:
 
 permissions:

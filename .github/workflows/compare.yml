@@ -5,8 +5,9 @@
 name: Compare new snow
 
 on:
-  schedule:
-    - cron: "41 8 * * *"
+  # Zeitplan vorerst ausgeschaltet (nur von Hand: Actions -> Run workflow).
+  # schedule:
+  #   - cron: "41 8 * * *"
   workflow_dispatch:
 
 permissions:

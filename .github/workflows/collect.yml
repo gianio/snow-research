@@ -5,9 +5,10 @@
 name: Collect validation data
 
 on:
-  schedule:
-    - cron: "17 7 * * *"
-    - cron: "47 18 * * *"
+  # Zeitplan vorerst ausgeschaltet (nur von Hand: Actions -> Run workflow).
+  # schedule:
+  #   - cron: "17 7 * * *"
+  #   - cron: "47 18 * * *"
   workflow_dispatch:
     inputs:
       days_back:
