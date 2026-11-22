@@ -63,6 +63,7 @@ def main():
     ap.add_argument("--out", default="dash_data")
     ap.add_argument("--site", default=os.environ.get("MODEL_SITE", ""))
     ap.add_argument("--screencheck", nargs="*", help="screencheck results folders (results.json)")
+    ap.add_argument("--archive", help="archive_forecast.py folder: earlier model runs, to show how the model changed")
     a = ap.parse_args()
     if not a.site:
         sys.exit("set MODEL_SITE")
@@ -284,6 +285,57 @@ def main():
     border = json.loads((HERE / "screencheck" / "ch_border.json").read_text())
     (out / "border.json").write_text(json.dumps({"type": "FeatureCollection", "attribution": "© swisstopo", "features": [
         {"type": "Feature", "properties": {"name": "Schweiz"}, "geometry": {"type": "MultiPolygon", "coordinates": [[r_] for r_ in border["rings"]]}}]}))
+
+    # ── model versions: the same days, scored for each archived run and the live one ──
+    ver_rows, va_rows = [], []
+    live_hn1d = [x for x in days_rows if x["period"] == "HN1D"]
+    for x in live_hn1d:
+        ver_rows.append({"run": sm["version"], "generated": sm["generated"], "day": x["day"], "slf_mean": x["slf_mean"],
+                         "model_mean": x["model_mean"], "bias": x["bias"], "mae_10km": x["mae_10km"], "ratio": x["ratio"]})
+    if a.archive and Path(a.archive).is_dir():
+        for f in sorted(Path(a.archive).glob("snowmapper_*.npz")):
+            z = np.load(f)
+            if "hourly" not in z.files or not bool(z["hourly"]):
+                continue
+            meta = json.loads(str(z["meta"]))
+            gen = dt.datetime.fromisoformat(meta["generated"].replace("Z", "+00:00"))
+            tts = np.array([dt.datetime.fromisoformat(t).timestamp() for t in z["times"]])
+            snow = z["h_SNOW"].astype(np.float32) * meta["snow_scale"] * meta.get("ns_settle", 1.0)
+            for x in live_hn1d + [{"day": (dt.date.fromisoformat(live_hn1d[0]["day"]) - dt.timedelta(days=k)).isoformat()} for k in (1, 2, 3)]:
+                day = x["day"]
+                try:
+                    m = slf_encoded(net, f"{SLF}/hn/map/HN1D/{day}/encoded", f"{SLF}/hn/map/colorscale")
+                except Exception:                            # noqa: BLE001
+                    continue
+                t1 = m["valid"]
+                t0 = t1 - dt.timedelta(hours=24)
+                if t1 > gen or t0.timestamp() < tts[0]:
+                    continue                                 # only days this run had as past hours
+                sel = (tts >= t0.timestamp()) & (tts < t1.timestamp())
+                ref = sample_slf(m, z["lat"], z["lon"])
+                mod = np.where(np.isfinite(ref), snow[sel].sum(0), np.nan)
+                ok = np.isfinite(ref) & np.isfinite(mod)
+                rb, mb = blocks(np.where(ok, ref, np.nan), 10), blocks(np.where(ok, mod, np.nan), 10)
+                okb = np.isfinite(rb) & np.isfinite(mb)
+                ver_rows.append({"run": meta["version"], "generated": meta["generated"], "day": day,
+                                 "slf_mean": r(ref[ok].mean()), "model_mean": r(mod[ok].mean()), "bias": r((mod[ok] - ref[ok]).mean()),
+                                 "mae_10km": r(np.abs(mb[okb] - rb[okb]).mean()), "ratio": r(mod[ok].sum() / max(1e-6, ref[ok].sum()), 3)})
+        for f in sorted(Path(a.archive).glob("variant_a_*.npz")):
+            man_ = json.loads(str(np.load(f)["manifest"]))
+            dr_ = (man_.get("drift") or {}).get("all") or {}
+            vi_ = (man_.get("validation") or {}).get("imis") or {}
+            pf_ = list((man_.get("precip_factor") or {}).values())
+            va_rows.append({"generated": man_.get("generated"), "drift": dr_.get("status"), "drift_bias_cm": r(dr_.get("bias_cm"), 1),
+                            "drift_rel_bias": r(dr_.get("rel_bias"), 3), "imis_bias_cm": r(vi_.get("bias_cm"), 1),
+                            "imis_mae_cm": r(vi_.get("mae_cm"), 1),
+                            "pf_at_min_share": r(sum(1 for v_ in pf_ if v_ <= 0.5001) / len(pf_), 3) if pf_ else None})
+    va_rows.append({"generated": man.get("generated"), "drift": (dr.get("all") or {}).get("status"),
+                    "drift_bias_cm": r((dr.get("all") or {}).get("bias_cm"), 1), "drift_rel_bias": r((dr.get("all") or {}).get("rel_bias"), 3),
+                    "imis_bias_cm": r(vi.get("bias_cm"), 1), "imis_mae_cm": r(vi.get("mae_cm"), 1),
+                    "pf_at_min_share": r(sum(1 for v_ in pf if v_ <= 0.5001) / len(pf), 3) if pf else None})
+    ver_rows.sort(key=lambda x: (x["day"], x["generated"] or ""))
+    save("model_versions", ver_rows, [{"label": "Vergleich", "value": "Jeder Lauf nur für Tage, die er als Vergangenheit kannte, gegen SLF HN1D"}])
+    save("va_versions", sorted(va_rows, key=lambda x: x["generated"] or ""))
 
     # ── coverage of the requested data types ──
     n = lambda rows, per=None: sum(1 for x in rows if per is None or x.get("period") == per)  # noqa: E731
