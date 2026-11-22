@@ -1,14 +1,15 @@
 # Keeps every Snowmapper forecast run (the site only serves the newest).
-# Every 2 h: if latest.json names a run not archived yet, a compact copy
+# Every hour: if latest.json names a run not archived yet, a compact copy
 # (archive_forecast.py) goes to the release «fc-archive-YYYY-MM» as an asset;
 # Variant A once per cycle. The index of what is archived lives on branch
 # «fc-archive» (index.json), the files themselves only as release assets.
 name: Archive forecasts
 
 on:
-  # Zeitplan vorerst ausgeschaltet (nur von Hand: Actions -> Run workflow).
-  # schedule:
-  #   - cron: "23 */2 * * *"
+  # Jede Stunde: so geht kein Lauf verloren (die Seite zeigt nur den neuesten).
+  # Die anderen Workflows bleiben ohne Zeitplan.
+  schedule:
+    - cron: "23 * * * *"
   workflow_dispatch:
 
 permissions:

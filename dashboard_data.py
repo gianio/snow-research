@@ -16,6 +16,7 @@ script's own text, so every number on the dashboard can be traced back.
   observer_hn      SLF Pro observed new snow vs model
   surface_obs      SLF Pro snow-surface symbols with Variant A classes
   coverage         which of the requested data types are in, and from where
+  trend            the three steering numbers per day (new-snow ratio and 10 km error, holdout bias, surface hit rate)
 
     MODEL_SITE=https://… python dashboard_data.py --out dash_data --screencheck screencheck/results/2026-11-21 \
         [--data data --archive archive]      # collected IMIS history and archived runs: earlier days on the map
@@ -51,6 +52,14 @@ def model3(ski6):
     return {"corn": "Nass", "wet": "Nass", "hard": "Kruste", "crust": "Kruste"}.get(ski6)
 BANDS = [(0, 1500), (1500, 2000), (2000, 2500), (2500, 5000)]
 PERIODS = {"HN1D": 24, "HN2D": 48, "HN3D": 72}
+
+
+def holdout_bias(man):
+    """Variant A manifest -> mean bias (cm) at holdout stations, their count, and at the assimilated ones."""
+    st_ = (man.get("validation") or {}).get("stations") or []
+    ho = [x["bias"] for x in st_ if x.get("holdout") and x.get("bias") is not None]
+    us = [x["bias"] for x in st_ if not x.get("holdout") and x.get("bias") is not None]
+    return (float(np.mean(ho)) if ho else None), len(ho), (float(np.mean(us)) if us else None)
 
 
 def r(v, p=2):
@@ -379,17 +388,55 @@ def main():
             dr_ = (man_.get("drift") or {}).get("all") or {}
             vi_ = (man_.get("validation") or {}).get("imis") or {}
             pf_ = list((man_.get("precip_factor") or {}).values())
-            va_rows.append({"generated": man_.get("generated"), "drift": dr_.get("status"), "drift_bias_cm": r(dr_.get("bias_cm"), 1),
+            hb_, hn_, ub_ = holdout_bias(man_)
+            va_rows.append({"generated": man_.get("generated"), "holdout_bias_cm": r(hb_, 1), "holdout_n": hn_,
+                            "assimilated_bias_cm": r(ub_, 1), "drift": dr_.get("status"), "drift_bias_cm": r(dr_.get("bias_cm"), 1),
                             "drift_rel_bias": r(dr_.get("rel_bias"), 3), "imis_bias_cm": r(vi_.get("bias_cm"), 1),
                             "imis_mae_cm": r(vi_.get("mae_cm"), 1),
                             "pf_at_min_share": r(sum(1 for v_ in pf_ if v_ <= 0.5001) / len(pf_), 3) if pf_ else None})
-    va_rows.append({"generated": man.get("generated"), "drift": (dr.get("all") or {}).get("status"),
+    hb_, hn_, ub_ = holdout_bias(man)
+    va_rows.append({"generated": man.get("generated"), "holdout_bias_cm": r(hb_, 1), "holdout_n": hn_,
+                    "assimilated_bias_cm": r(ub_, 1), "drift": (dr.get("all") or {}).get("status"),
                     "drift_bias_cm": r((dr.get("all") or {}).get("bias_cm"), 1), "drift_rel_bias": r((dr.get("all") or {}).get("rel_bias"), 3),
                     "imis_bias_cm": r(vi.get("bias_cm"), 1), "imis_mae_cm": r(vi.get("mae_cm"), 1),
                     "pf_at_min_share": r(sum(1 for v_ in pf if v_ <= 0.5001) / len(pf), 3) if pf else None})
     ver_rows.sort(key=lambda x: (x["day"], x["generated"] or ""))
     save("model_versions", ver_rows, [{"label": "Vergleich", "value": "Jeder Lauf nur für Tage, die er als Vergangenheit kannte, gegen SLF HN1D"}])
     save("va_versions", sorted(va_rows, key=lambda x: x["generated"] or ""))
+
+    # ── trend: the three numbers to steer by, one value per day ──
+    # new snow: per day the first run that had the day as past (what the app showed the morning after)
+    trend = []
+    first = {}
+    for x in ver_rows:
+        if x["ratio"] is not None and (x["day"] not in first or (x["generated"] or "") < (first[x["day"]]["generated"] or "")):
+            first[x["day"]] = x
+    for x in days_rows:
+        if x["period"] == "HN1D" and x["day"] not in first:
+            first[x["day"]] = {**x, "run": sm["version"]}
+    for day, x in sorted(first.items()):
+        trend.append({"metric": "hn_ratio", "day": day, "value": x["ratio"], "run": x.get("run"), "lo": 0.9, "hi": 1.1})
+        trend.append({"metric": "hn_mae10", "day": day, "value": x["mae_10km"], "run": x.get("run"), "lo": 0, "hi": 2})
+    # snow height at holdout stations, per Variant A cycle (last one of a day)
+    by_day = {}
+    for x in sorted(va_rows, key=lambda x: x["generated"] or ""):
+        if x.get("holdout_bias_cm") is not None and x.get("generated"):
+            by_day[x["generated"][:10]] = x
+    for day, x in sorted(by_day.items()):
+        trend.append({"metric": "hs_holdout", "day": day, "value": x["holdout_bias_cm"], "run": x["generated"], "lo": -2, "hi": 2,
+                      "n": x["holdout_n"], "other": x["assimilated_bias_cm"]})
+    # snow surface: hit rate where the model has a class, and how often it has one
+    for day in sorted({x["day"] for x in surf}):
+        rows_ = [x for x in surf if x["day"] == day]
+        cls = [x for x in rows_ if x["hit"] is not None]
+        if cls:
+            trend.append({"metric": "surf_hit", "day": day, "value": r(sum(x["hit"] for x in cls) / len(cls), 3), "n": len(cls),
+                          "lo": 0.7, "hi": 1})
+        trend.append({"metric": "surf_cover", "day": day, "value": r(len(cls) / len(rows_), 3), "n": len(rows_), "lo": 0.9, "hi": 1})
+    save("trend", trend, [{"label": "Ziele", "value": "Neuschnee Modell ÷ SLF 0.9–1.1, Fehler 10 km < 2 cm; Holdout-Bias ±2 cm; "
+                           "Oberfläche ≥ 70 % Treffer, ≥ 90 % mit Modellklasse"},
+                          {"label": "Neuschnee", "value": "je Tag der erste Lauf, der den Tag als Vergangenheit hatte (Archiv), sonst der aktuelle"},
+                          {"label": "Schneehöhe", "value": "Variant-A-Manifest: mittlerer Bias der Holdout-Stationen, letzter Zyklus des Tages"}])
 
     # ── coverage of the requested data types ──
     n = lambda rows, per=None: sum(1 for x in rows if per is None or x.get("period") == per)  # noqa: E731
