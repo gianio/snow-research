@@ -10,13 +10,15 @@ script's own text, so every number on the dashboard can be traced back.
   calibration_loo  best variant chosen without the day it is scored on
   imis_hs          Variant A snow height vs IMIS measured, latest hour, per station
   imis_hn24        IMIS snow-height gain over the last 24 h vs the new-snow layer
+  imis_daily       with --data: per day (06 UTC) bias / MAE of both, from the collected IMIS history
   va_status        Variant A drift / correction status from its manifest
   screenshots      screencheck results (WhiteRisk / SLF Pro screenshots)
   observer_hn      SLF Pro observed new snow vs model
   surface_obs      SLF Pro snow-surface symbols with Variant A classes
   coverage         which of the requested data types are in, and from where
 
-    MODEL_SITE=https://… python dashboard_data.py --out dash_data --screencheck screencheck/results/2026-11-21
+    MODEL_SITE=https://… python dashboard_data.py --out dash_data --screencheck screencheck/results/2026-11-21 \
+        [--data data --archive archive]      # collected IMIS history and archived runs: earlier days on the map
 """
 from __future__ import annotations
 
@@ -64,6 +66,8 @@ def main():
     ap.add_argument("--site", default=os.environ.get("MODEL_SITE", ""))
     ap.add_argument("--screencheck", nargs="*", help="screencheck results folders (results.json)")
     ap.add_argument("--archive", help="archive_forecast.py folder: earlier model runs, to show how the model changed")
+    ap.add_argument("--data", help="collected observations (collect.yml, branch data): IMIS history for earlier days")
+    ap.add_argument("--days", type=int, default=30, help="days of IMIS history on the map")
     a = ap.parse_args()
     if not a.site:
         sys.exit("set MODEL_SITE")
@@ -157,7 +161,7 @@ def main():
 
     # ── IMIS: snow height (Variant A) and 24 h gain (new-snow layer) ──
     from screencheck import Models
-    M = Models(site)
+    M = Models(site, a.archive)
     meas = net.get("https://measurement-api.slf.ch/public/api/imis/measurements", light=True, cache=False).json()
     st = {s["code"]: s for s in M.stations if s.get("type", "SNOW_FLAT") == "SNOW_FLAT"}
     by = {}
@@ -165,6 +169,16 @@ def main():
         if x.get("HS") is None or x["station_code"] not in st:
             continue
         by.setdefault(x["station_code"], []).append((dt.datetime.fromisoformat(x["measure_date"].replace("Z", "+00:00")), float(x["HS"])))
+    # history: what collect.yml stored (hourly HS per station), for one value per day at 06 UTC
+    hist = {}
+    if a.data:
+        from snowval import store
+        since = (last_past.date() - dt.timedelta(days=a.days + 1)).isoformat()
+        for x in store.load(a.data, "imis", "hs", since=since):
+            if x["point_id"] in st and isinstance(x["value"], float):
+                hist.setdefault(x["point_id"], {})[dt.datetime.fromisoformat(x["valid_to"].replace("Z", "+00:00"))] = x["value"]
+    for code_, series in by.items():
+        hist.setdefault(code_, {}).update(dict(series))
     # Variant A nudges its precipitation with IMIS snow heights, except at every 4th station
     # (holdout): only those are an independent test of its snow height
     holdout = {x["station"]: bool(x.get("holdout")) for x in (M.man.get("validation") or {}).get("stations", [])}
@@ -189,6 +203,35 @@ def main():
                 hn_rows.append({"station": code_, "label": s["label"], "elev": s.get("elevation"), "band": band,
                                 "from": t_first.isoformat(), "to": t_last.isoformat(), "measured_gain": r(gain, 1),
                                 "model_newsnow": r(mh, 1), "diff": r(mh - gain, 1)})
+    # one row per station and day: snow height at 06 UTC, and its gain over the 24 h before
+    day_rows = []
+    for code_, ser in hist.items():
+        s = st[code_]
+        band = next((f"{b[0]}–{b[1]} m" for b in BANDS if b[0] <= (s.get("elevation") or 0) < b[1]), "")
+        for k in range(a.days):
+            t6 = dt.datetime.combine(last_past.date() - dt.timedelta(days=k), dt.time(6), UTC)
+            h1, h0 = ser.get(t6), ser.get(t6 - dt.timedelta(hours=24))
+            if h1 is None:
+                continue
+            base = {"station": code_, "label": s["label"], "elev": s.get("elevation"), "band": band, "lat": s["lat"],
+                    "lon": s["lon"], "day": t6.date().isoformat(), "holdout": holdout.get(code_)}
+            mv = M.va_hs(s["lat"], s["lon"], s.get("elevation"), t6)
+            if mv is not None:
+                day_rows.append({**base, "layer": "hs", "measured": r(h1, 1), "model": r(mv, 1), "diff": r(mv - h1, 1)})
+            if h0 is not None:
+                mh = M.newsnow(s["lat"], s["lon"], t6 - dt.timedelta(hours=24), t6)
+                if mh is not None:
+                    g = max(0.0, h1 - h0)
+                    day_rows.append({**base, "layer": "hn24", "measured": r(g, 1), "model": r(mh, 1), "diff": r(mh - g, 1)})
+    # per day: how far off the model was, to see changes over the season
+    summ = {}
+    for x in day_rows:
+        if x["layer"] == "hs" and not x["holdout"]:
+            continue                                     # only holdout stations test Variant A's snow height
+        summ.setdefault((x["day"], x["layer"]), []).append(x["diff"])
+    save("imis_daily", [{"day": d_, "layer": l_, "n": len(v), "bias": r(float(np.mean(v)), 1), "mae": r(float(np.mean(np.abs(v))), 1)}
+                        for (d_, l_), v in sorted(summ.items())],
+         [{"label": "Werte", "value": "IMIS 06 UTC; hs nur Holdout-Stationen, hn24 = Zunahme der Schneehöhe in 24 h"}])
     save("imis_hs", sorted(hs_rows, key=lambda x: x["station"]),
          [{"label": "Modell", "value": "Variant A (SNOWPACK), flacher Hang, auf Stationshöhe; 3 nächste Wetterpunkte"},
           {"label": "Unabhängig", "value": "Nur Holdout-Stationen: Variant A korrigiert den Niederschlag mit den übrigen"}])
@@ -260,11 +303,22 @@ def main():
 
     # ── one set of points for the map, and the same as GeoJSON for the app ──
     pts = []
+    seen_days = {(x["layer"], x["day"]) for x in day_rows}
+    for x in day_rows:
+        pts.append({"layer": x["layer"], "day": x["day"], "id": x["station"], "label": f"{x['station']} {x['label']}",
+                    "lat": x["lat"], "lon": x["lon"], "elev": x["elev"], "observed": x["measured"], "model": x["model"],
+                    "diff": x["diff"], "unit": "cm", "hit": None,
+                    "note": ("Holdout" if x["holdout"] else "zur Korrektur genutzt") if x["layer"] == "hs"
+                    else "06→06 UTC, gemessen = Zunahme der Schneehöhe (untere Grenze)"})
     for x in hs_rows:
+        if ("hs", x["time"][:10]) in seen_days:
+            continue
         pts.append({"layer": "hs", "day": x["time"][:10], "id": x["station"], "label": f"{x['station']} {x['label']}", "lat": x["lat"],
                     "lon": x["lon"], "elev": x["elev"], "observed": x["measured"], "model": x["model"], "diff": x["diff"], "unit": "cm",
                     "hit": None, "note": "Holdout" if x["holdout"] else "zur Korrektur genutzt"})
     for x in hn_rows:
+        if ("hn24", x["to"][:10]) in seen_days:
+            continue
         s_ = st.get(x["station"], {})
         pts.append({"layer": "hn24", "day": x["to"][:10], "id": x["station"], "label": f"{x['station']} {x['label']}", "lat": s_.get("lat"),
                     "lon": s_.get("lon"), "elev": x["elev"], "observed": x["measured_gain"], "model": x["model_newsnow"], "diff": x["diff"],

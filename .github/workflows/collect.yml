@@ -5,10 +5,9 @@
 name: Collect validation data
 
 on:
-  # Zeitplan vorerst ausgeschaltet (nur von Hand: Actions -> Run workflow).
-  # schedule:
-  #   - cron: "17 7 * * *"
-  #   - cron: "47 18 * * *"
+  schedule:
+    - cron: "17 7 * * *"
+    - cron: "47 18 * * *"
   workflow_dispatch:
     inputs:
       days_back:
@@ -52,7 +51,8 @@ jobs:
         run: python scrape_snowmaps.py --data data --days-back "${{ github.event.inputs.days_back || '2' }}"
 
       - name: gipfelbuch.ch reports
-        if: always()
+        # vorerst aus: einschalten mit Repository-Variable GIPFELBUCH_ENABLED = 1
+        if: always() && vars.GIPFELBUCH_ENABLED == '1'
         env:
           GIPFELBUCH_EMAIL: ${{ secrets.GIPFELBUCH_EMAIL }}
           GIPFELBUCH_PASSWORD: ${{ secrets.GIPFELBUCH_PASSWORD }}
