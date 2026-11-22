@@ -37,6 +37,16 @@ import calibrate_newsnow as cal                                  # noqa: E402
 from compare_newsnow import blocks, load_model, sample_slf, stats   # noqa: E402
 
 UTC = dt.timezone.utc
+# simple snow-surface comparison: three classes only
+OBS3 = {"newsnow": "Pulver", "faceted": "Pulver", "wet": "Nass", "carrying": "Kruste", "breaking": "Kruste"}
+
+
+def model3(ski6):
+    if not ski6 or ski6 == "none":
+        return None
+    if ski6.startswith("powder") or ski6 == "loose_faceted":
+        return "Pulver"
+    return {"corn": "Nass", "wet": "Nass", "hard": "Kruste", "crust": "Kruste"}.get(ski6)
 BANDS = [(0, 1500), (1500, 2000), (2000, 2500), (2500, 5000)]
 PERIODS = {"HN1D": 24, "HN2D": 48, "HN3D": 72}
 
@@ -234,14 +244,18 @@ def main():
                                 "model_class": lab(x.get("model_bin")), "class_diff": x["model_bin"] - x["shot_bin"]})
             if it.get("kind") == "obs_symbols" and it.get("legend_roi"):
                 for x in v["rows"]:
-                    surf.append({"key": f"{day}/{x['id']}", "day": day, "symbol": x["symbol"], "observed": x.get("reported"),
-                                 "lat": r(x["lat"], 4), "lon": r(x["lon"], 4), "va_ski6": x.get("va_ski6"),
-                                 "va_ski18": x.get("va_ski18"), "va_wind": x.get("va_wind"), "hit": x.get("hit")})
+                    o3, m3 = OBS3.get(x["symbol"]), model3(x.get("va_ski6"))
+                    if o3 is None:
+                        continue                         # wind, surface hoar, other: not in the simple comparison
+                    surf.append({"key": f"{day}/{x['id']}", "day": day, "symbol": x["symbol"], "observed": o3,
+                                 "model": m3 or "keine Klasse", "lat": r(x["lat"], 4), "lon": r(x["lon"], 4),
+                                 "va_ski6": x.get("va_ski6"), "hit": None if m3 is None else o3 == m3})
     save("screenshots", shots, [{"label": "Werkzeug", "value": "screencheck/screencheck.py (Farbstufen abgelesen, georeferenziert)"},
                                 {"label": "Ablesen geprüft", "value": "Abgelesene Stufe gegen exakte SLF-Karte bzw. IMIS-Messung; unter 60 % unzuverlässig"}])
     save("observer_hn", obs, [{"label": "Legende", "value": "SLF Pro: 0–5, 5–10, 10–20, 20–30, 30–40, 40–60, 60–80, 80–100, >100 cm"}])
-    save("surface_obs", surf, [{"label": "Treffer", "value": "Neuschnee/kantig → Pulver; feucht → Sulz/nass; tragfähig/brüchig → Kruste/hart; "
-                                "Wind → Windlayer oder ski18-Wind; Oberflächenreif → ski18 surface_hoar"}])
+    save("surface_obs", surf, [{"label": "Vergleich", "value": "Drei Klassen. Beobachtung: Neuschnee/kantig = Pulver, feucht = Nass, "
+                                "tragfähig/brüchig = Kruste (Wind, Reif, andere nicht gewertet). Modell (Variant A ski6): Pulver/lockerer "
+                                "Altschnee = Pulver, Sulz/nass = Nass, hart/Kruste = Kruste; ohne Klasse = nicht vergleichbar."}])
 
     # ── one set of points for the map, and the same as GeoJSON for the app ──
     pts = []
@@ -260,8 +274,8 @@ def main():
                     "hit": x["class_diff"] == 0, "note": f"Modell {x['model_cm']} cm"})
     for x in surf:
         pts.append({"layer": "surface", "day": x["day"], "id": x["key"], "label": f"Oberfläche {x['day']}", "lat": x["lat"], "lon": x["lon"],
-                    "elev": None, "observed": x["symbol"], "model": f"{x['va_ski6']} / {x['va_ski18']}", "diff": None, "unit": "",
-                    "hit": x["hit"], "note": f"Wind: {x['va_wind']}"})
+                    "elev": None, "observed": x["observed"], "model": x["model"], "diff": None, "unit": "",
+                    "hit": x["hit"], "note": f"Variant A ski6: {x['va_ski6']}"})
     save("map_points", [p_ for p_ in pts if p_["lat"] is not None])
     (out / "validation_points.geojson").write_text(json.dumps({"type": "FeatureCollection", "generated": made, "model_run": sm["version"],
         "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [p_["lon"], p_["lat"]]},

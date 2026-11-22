@@ -53,7 +53,9 @@ def main():
     for tx in range(tx0, tx1 + 1):
         for ty in range(ty0, ty1 + 1):
             r = net.get(URL.format(layer=a.layer, z=z, x=tx, y=ty, ext=a.ext), light=True, referer="https://map.geo.admin.ch/")
-            mosaic.paste(Image.open(io.BytesIO(r.content)).convert("RGB"), ((tx - tx0) * 256, (ty - ty0) * 256))
+            t = Image.open(io.BytesIO(r.content)).convert("RGBA")          # PNG layers are transparent outside CH
+            bg = Image.new("RGBA", t.size, (255, 255, 255, 255))
+            mosaic.paste(Image.alpha_composite(bg, t).convert("RGB"), ((tx - tx0) * 256, (ty - ty0) * 256))
             n += 1
     # crop to the box exactly
     cx0, cy0 = round((x0f - tx0) * 256), round((y0f - ty0) * 256)
