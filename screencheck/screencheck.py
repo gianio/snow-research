@@ -66,7 +66,7 @@ CITIES = {  # lat, lon of the town centre / map marker
     "Lausanne": (46.5197, 6.6323), "Genève": (46.2044, 6.1432), "St. Gallen": (47.4245, 9.3767), "Biel": (47.1368, 7.2468),
     "Winterthur": (47.4988, 8.7237), "Milano": (45.4642, 9.1900), "Torino": (45.0703, 7.6869), "Strasbourg": (48.5734, 7.7521),
     "Stuttgart": (48.7758, 9.1829), "Mulhouse": (47.7508, 7.3359), "Freiburg": (47.9990, 7.8421), "Ulm": (48.4011, 9.9876),
-    "Parma": (44.8015, 10.3279), "Genova": (44.4056, 8.9463), "Grenoble": (45.1885, 5.7245), "Chur": (46.8508, 9.5320),
+    "Parma": (44.8015, 10.3279), "Como": (45.8081, 9.0852), "Lugano": (46.0037, 8.9511), "Genova": (44.4056, 8.9463), "Grenoble": (45.1885, 5.7245), "Chur": (46.8508, 9.5320),
 }
 _B = json.loads((HERE / "ch_border.json").read_text())
 BORDER = [np.array(r)[:, ::-1] for r in _B["rings"]]   # (lat, lon) rings, © swisstopo
@@ -84,9 +84,12 @@ def in_switzerland(lat, lon):
     return inside
 
 WR_COLORS = ["#CDFFCD", "#99F0B2", "#53BD9F", "#3296B4", "#0670B0", "#054F8C", "#610432", "#4D020F"]
-LEGENDS = {  # lower bounds of each colour class, cm
-    "wr_hn": [1, 10, 20, 30, 40, 60, 80, 100],
-    "wr_hs": [1, 20, 50, 80, 120, 200, 300, 400],
+LEGENDS = {  # edges = lower bounds of each class (cm); offset = class of the palette's first colour;
+               # hollow = class of a white / hollow marker (-1 = below the first edge)
+    "wr_hn": {"edges": [1, 10, 20, 30, 40, 60, 80, 100], "offset": 0, "hollow": -1},
+    "wr_hs": {"edges": [1, 20, 50, 80, 120, 200, 300, 400], "offset": 0, "hollow": -1},
+    # SLF Pro observer maps: white = 0-5 cm, then the same colours one class up
+    "slf_obs_hn": {"edges": [0, 5, 10, 20, 30, 40, 60, 80, 100], "offset": 1, "hollow": 0},
 }
 
 
@@ -201,7 +204,7 @@ def refine_ring(img, x, y, r=None):
     return (best[1], best[2], True) if best else (x, y, False)
 
 
-def border_mask(img, gray=(138, 166), max_sat=14, x_range=None):
+def border_mask(img, gray=(138, 166), max_sat=14, x_range=None, y_range=None):
     a = img.astype(int)
     g = a.mean(-1)
     sat = a.max(-1) - a.min(-1)
@@ -209,6 +212,9 @@ def border_mask(img, gray=(138, 166), max_sat=14, x_range=None):
     if x_range:
         m[:, :x_range[0]] = False
         m[:, x_range[1]:] = False
+    if y_range:                                          # e.g. leave out a browser toolbar
+        m[:y_range[0]] = False
+        m[y_range[1]:] = False
     return m
 
 
@@ -216,7 +222,7 @@ def refine_on_border(G, img, spec):
     """Fit the official border line onto the border drawn in the image (all 6 affine parameters).
     Objective: mean distance (capped) from the projected border vertices to the nearest border pixel."""
     from scipy.optimize import minimize
-    m = border_mask(img, tuple(spec.get("gray", (138, 166))), spec.get("max_sat", 14), spec.get("x_range"))
+    m = border_mask(img, tuple(spec.get("gray", (138, 166))), spec.get("max_sat", 14), spec.get("x_range"), spec.get("y_range"))
     if m.sum() < 500:
         return G, None
     dist = ndi.distance_transform_edt(~m)
@@ -235,6 +241,11 @@ def refine_on_border(G, img, spec):
         return (q0 - [cx, cy]) @ M.T + [cx + tx, cy + ty]
 
     def cost(v):
+        sx, sy, rot, shear = v[:4]
+        # only small corrections are plausible; anything else is the optimiser shrinking the
+        # border onto some grey patch, so it is penalised hard
+        if not (0.8 < sx < 1.25 and 0.8 < sy < 1.25 and abs(rot) < 0.08 and abs(shear) < 0.08):
+            return cap * 2
         q = warp(v)
         ok = (q[:, 0] >= 0) & (q[:, 0] < w - 1) & (q[:, 1] >= 0) & (q[:, 1] < h - 1)
         if ok.mean() < 0.5:
@@ -264,14 +275,12 @@ def refine_on_border(G, img, spec):
 
 def georef_border(img, spec):
     """SLF Pro maps (LV95, north up): the national border's outermost pixels = Switzerland's extreme points."""
-    x0, x1 = spec.get("x_range", [0, img.shape[1]])
-    a = img[:, x0:x1].astype(int)
-    g = a.mean(-1)
-    sat = a.max(-1) - a.min(-1)
     lo, hi = spec.get("gray", [138, 166])
-    m = (g >= lo) & (g <= hi) & (sat < 14)
-    # the border is the long connected band; keep the largest component
-    lab, n = ndi.label(m)
+    m = border_mask(img, (lo, hi), spec.get("max_sat", 14), spec.get("x_range"), spec.get("y_range"))
+    x0 = 0
+    # the border is the long connected band; keep the largest component (8-connected: a thin
+    # diagonal line is only connected through its corners)
+    lab, n = ndi.label(m, structure=np.ones((3, 3)))
     if n == 0:
         raise SystemExit("border not found")
     big = 1 + int(np.argmax(ndi.sum(m, lab, range(1, n + 1))))
@@ -375,6 +384,21 @@ class Models:
                 gen = dt.datetime.strptime(man["generated"], "%Y-%m-%dT%H:%MZ").replace(tzinfo=UTC)
                 self.arc_va.append((gen, f, man, keys))
 
+    def imis_hs(self, code, t, tol_h=1.0):
+        """Measured snow height at an IMIS station near time t (API gives the last 24 h only)."""
+        if not hasattr(self, "_imis"):
+            try:
+                meas = self.net.get("https://measurement-api.slf.ch/public/api/imis/measurements", light=True, cache=False).json()
+            except Exception:                            # noqa: BLE001
+                meas = []
+            self._imis = {}
+            for x in meas:
+                if x.get("HS") is not None:
+                    self._imis.setdefault(x["station_code"], []).append(
+                        (dt.datetime.fromisoformat(x["measure_date"].replace("Z", "+00:00")), float(x["HS"])))
+        best = min(self._imis.get(code, []), key=lambda p: abs((p[0] - t).total_seconds()), default=None)
+        return best[1] if best and abs((best[0] - t).total_seconds()) <= tol_h * 3600 else None
+
     def _load(self, f):
         if f not in self._npz:
             if len(self._npz) > 4:
@@ -407,12 +431,22 @@ class Models:
         return (i, j) if 0 <= i < len(la) and 0 <= j < len(lo) else None
 
     def newsnow(self, lat, lon, t0, t1):
+        """New snow t0..t1 at the cell: the live run where it reaches, the archive for the hours before it."""
         ij = self.cell(lat, lon)
         if ij is None:
             return None
+        start = dt.datetime.fromtimestamp(self.ts[0], UTC)
+        if t0 < start:
+            if t1 <= start:
+                return self._arc_newsnow(lat, lon, t0, t1)
+            early = self._arc_newsnow(lat, lon, t0, start)
+            if early is None:
+                return None
+            late = self.newsnow(lat, lon, start, t1)
+            return None if late is None else early + late
         a, b = np.searchsorted(self.ts, t0.timestamp()), np.searchsorted(self.ts, t1.timestamp())
-        if b - a < 22:
-            return self._arc_newsnow(lat, lon, t0, t1)
+        if b - a < (t1 - t0).total_seconds() / 3600 * 0.9:
+            return None
         self.used.add(f"live {self.sm['version']}")
         return float(self.cum[b][ij] - self.cum[a][ij])
 
@@ -545,8 +579,51 @@ def local(ts):
     return (t.replace(tzinfo=ZRH) if t.tzinfo is None else t).astimezone(UTC)
 
 
+SYMBOL_COLOURS = {  # SLF Pro snow-surface symbols by colour
+    "red": lambda a: (a[..., 0] > 190) & (a[..., 1] < 80) & (a[..., 2] < 80),
+    "orange": lambda a: (a[..., 0] > 220) & (a[..., 1] > 120) & (a[..., 1] < 200) & (a[..., 2] < 70),
+    "cyan": lambda a: (a[..., 2] > 200) & (a[..., 1] > 150) & (a[..., 0] < 150),
+    "blue": lambda a: (a[..., 2] > 150) & (a[..., 0] < 60) & (a[..., 1] < 60),
+    "black": lambda a: a.max(-1) < 110,
+}
+
+
+def colour_blobs(a, lo, hi):
+    """All symbol-sized blobs per colour: [(colour, slice, mask)]."""
+    out = []
+    for name, f in SYMBOL_COLOURS.items():
+        m = f(a)
+        lab, n = ndi.label(ndi.binary_closing(m, iterations=2) | m)
+        for i, sl in enumerate(ndi.find_objects(lab), 1):
+            h, w = sl[0].stop - sl[0].start, sl[1].stop - sl[1].start
+            if lo <= h <= hi and lo <= w <= hi:
+                out.append((name, sl, lab[sl] == i))
+    return out
+
+
+def shape_score(m1, m2, n=24):
+    """Overlap of two binary shapes after scaling both to n x n (1 = identical)."""
+    r = lambda m: np.asarray(Image.fromarray((m * 255).astype(np.uint8)).resize((n, n), Image.BILINEAR)) > 100  # noqa: E731
+    a, b = r(m1), r(m2)
+    u = (a | b).sum()
+    return float((a & b).sum() / u) if u else 0.0
+
+
+def legend_templates(img, roi, names):
+    """Symbols of the map's own legend, top to bottom, named as in the manifest."""
+    x0, y0, x1, y1 = roi
+    k = scale_of(img)
+    bl = colour_blobs(img[y0:y1, x0:x1].astype(int), int(4 * k), int(60 * k))
+    bl.sort(key=lambda b: b[1][0].start)
+    if len(bl) != len(names):
+        raise ValueError(f"Legende: {len(bl)} Symbole gefunden, {len(names)} erwartet ({names})")
+    return [{"name": nm, "colour": c, "mask": m, "h": m.shape[0], "w": m.shape[1]} for nm, (c, sl, m) in zip(names, bl)]
+
+
 def run_item(it, base: Path, M: Models, border, out: Path):
-    img = np.asarray(Image.open(base / it["file"]).convert("RGB"))
+    img = np.asarray(Image.open(base / it["file"]).convert("RGB")).copy()
+    for x0_, y0_, x1_, y1_ in it.get("ignore", []):     # panels drawn over the map: blank them out
+        img[y0_:y1_, x0_:x1_] = 255
     g = it["georef"]
     if "points" in g:
         pts, notes = [], []
@@ -570,7 +647,9 @@ def run_item(it, base: Path, M: Models, border, out: Path):
         G, _ = refine_on_border(G, img, spec)
     t1 = local(it["valid_local"])
     t0 = t1 - dt.timedelta(hours=it.get("window_h", 24))
-    edges = LEGENDS.get(it.get("legend", ""), [])
+    leg = LEGENDS.get(it.get("legend", ""), {"edges": [], "offset": 0, "hollow": -1})
+    edges = leg["edges"]
+    to_bin = lambda k: leg["hollow"] if k == -1 else k + leg["offset"]   # noqa: E731  palette index -> class
     rows = []
     kind, var = it["kind"], it["var"]
 
@@ -595,14 +674,19 @@ def run_item(it, base: Path, M: Models, border, out: Path):
             if k < 0:
                 continue
             mv = model_value(s["lat"], s["lon"], s.get("elevation"))
-            rows.append({"id": s["code"], "label": s["label"], "lat": s["lat"], "lon": s["lon"], "elev": s.get("elevation"),
-                         "px": round(x), "py": round(y), "shot_bin": k,
-                         "model": mv, "model_bin": bin_of(mv, edges)})
+            r = {"id": s["code"], "label": s["label"], "lat": s["lat"], "lon": s["lon"], "elev": s.get("elevation"),
+                 "px": round(x), "py": round(y), "shot_bin": to_bin(k), "model": mv, "model_bin": bin_of(mv, edges)}
+            if var == "hs":                               # self-test: what the station actually measured then
+                rv = M.imis_hs(s["code"], t1)
+                if rv is not None:
+                    r["ref"], r["ref_bin"] = rv, bin_of(rv, edges)
+            rows.append(r)
     elif kind == "raster":
         ref = None
-        if it.get("reference") == "slf_hn1d":
+        if str(it.get("reference", "")).startswith("slf_hn"):
             from scrape_snowmaps import slf_encoded, slf_sample, SLF
-            ref = slf_encoded(M.net, f"{SLF}/hn/map/HN1D/{t1:%Y-%m-%d}/encoded", f"{SLF}/hn/map/colorscale")
+            per = {24: "HN1D", 48: "HN2D", 72: "HN3D"}.get(it.get("window_h", 24), "HN1D")
+            ref = slf_encoded(M.net, f"{SLF}/hn/map/{per}/{t1:%Y-%m-%d}/encoded", f"{SLF}/hn/map/colorscale")
         la, lo, el = M.sm["lat"], M.sm["lon"], M.sm["elev"]
         LA, LO = np.meshgrid(la, lo, indexing="ij")
         X, Y = G.px(LA.ravel(), LO.ravel())
@@ -617,11 +701,42 @@ def run_item(it, base: Path, M: Models, border, out: Path):
             lat, lon = float(LA.ravel()[i]), float(LO.ravel()[i])
             mv = model_value(lat, lon, float(el.ravel()[i]))
             r = {"id": f"c{i}", "lat": lat, "lon": lon, "elev": float(el.ravel()[i]), "px": round(X[i]), "py": round(Y[i]),
-                 "shot_bin": int(ks[n_]), "model": mv, "model_bin": bin_of(mv, edges)}
+                 "shot_bin": to_bin(int(ks[n_])), "model": mv, "model_bin": bin_of(mv, edges)}
             if ref is not None:
                 rv = float(slf_sample(ref, np.array([lat]), np.array([lon]))[0])
                 r["ref"], r["ref_bin"] = rv, bin_of(rv, edges)
             rows.append(r)
+    elif kind == "obs_symbols" and it.get("legend_roi"):
+        templates = legend_templates(img, it["legend_roi"], it["legend_items"])
+        x0, x1 = it.get("x_range", [0, img.shape[1]])
+        lr = it["legend_roi"]
+        hmin = min(t["h"] for t in templates) * 0.5
+        hmax = max(max(t["h"], t["w"]) for t in templates) * 2.2
+        day = t1.astimezone(ZRH).date()
+        coarse = it.get("symbol_coarse", {})
+        for c, sl, m in colour_blobs(img[:, x0:x1].astype(int), int(hmin), int(hmax)):
+            cy, cx = (sl[0].start + sl[0].stop) / 2, x0 + (sl[1].start + sl[1].stop) / 2
+            if lr[0] <= cx <= lr[2] and lr[1] - 40 <= cy <= lr[3]:
+                continue                                     # the legend itself
+            cand = [t for t in templates if t["colour"] == c]
+            if not cand:
+                continue
+            # one template of this colour: take it; several: shape, then size
+            if len(cand) == 1:
+                best, score = cand[0], 1.0
+            else:
+                sc = [(shape_score(m, t["mask"]) - 0.15 * abs(math.log((m.shape[0] * m.shape[1]) / (t["h"] * t["w"]))), t) for t in cand]
+                score, best = max(sc, key=lambda x: x[0])
+            if score < 0.25:
+                continue
+            lat, lon = G.latlon(cx, cy)
+            if not in_switzerland(np.array([lat]), np.array([lon]))[0]:
+                continue
+            rep_c = coarse.get(best["name"])
+            v6, v18, vw = M.va_class("ski6", lat, lon, day), M.va_class("ski18", lat, lon, day), M.va_class("wind", lat, lon, day)
+            rows.append({"id": f"{best['name']}@{round(cx)},{round(cy)}", "lat": lat, "lon": lon, "px": round(cx), "py": round(cy),
+                         "symbol": best["name"], "match": round(score, 2), "reported": rep_c, "va_ski6": v6, "va_ski18": v18, "va_wind": vw,
+                         "hit": surface_hit(rep_c, v6, v18, vw)})
     elif kind in ("obs_points", "obs_symbols"):
         x0, x1 = it.get("x_range", [0, img.shape[1]])
         a = img[:, x0:x1].astype(int)
@@ -641,7 +756,8 @@ def run_item(it, base: Path, M: Models, border, out: Path):
             for i, sl in enumerate(ndi.find_objects(lab), 1):
                 hh, ww = sl[0].stop - sl[0].start, sl[1].stop - sl[1].start
                 k_ = scale_of(img)
-                if not (14 * k_ <= hh <= 80 * k_ and 14 * k_ <= ww <= 80 * k_):
+                lo_, hi_ = it.get("marker_px", [14 * k_, 80 * k_])
+                if not (lo_ <= hh <= hi_ and lo_ <= ww <= hi_):
                     continue
                 fill = (lab[sl] == i).mean()
                 if kind == "obs_points" and (abs(hh - ww) > 0.3 * max(hh, ww)
@@ -658,7 +774,7 @@ def run_item(it, base: Path, M: Models, border, out: Path):
                     if k == -2:
                         continue
                     mv = model_value(lat, lon)
-                    r.update({"shot_bin": k, "model": mv, "model_bin": bin_of(mv, edges)})
+                    r.update({"shot_bin": to_bin(k), "model": mv, "model_bin": bin_of(mv, edges)})
                 else:
                     day = t1.astimezone(ZRH).date()
                     cls = (it.get("symbol_legend") or {}).get(name)
@@ -679,6 +795,28 @@ def run_item(it, base: Path, M: Models, border, out: Path):
     return G, rows, ov_path, (t0, t1), edges
 
 
+def coarse6(c):
+    if not c or c == "none":
+        return c
+    return "powder" if c.startswith("powder") else {"hard": "hard", "crust": "crust", "corn": "corn_wet", "wet": "corn_wet",
+                                                    "thin_cover": "thin_none", "loose_faceted": "powder"}.get(c, c)
+
+
+def surface_hit(rep_c, v6, v18, vw):
+    """Does Variant A agree with the observed surface? None if not comparable."""
+    if not rep_c or v6 is None:
+        return None
+    if v6 == "none":
+        return False                                     # observed snow surface, model shows no snow / no class
+    if rep_c == "wind":
+        return vw not in (None, "none") or "wind" in str(v18)
+    if rep_c == "hoar":
+        return "hoar" in str(v18)
+    if rep_c == "crust":
+        return coarse6(v6) in ("crust", "hard") or "crust" in str(v18) or "hard" in str(v18)
+    return coarse6(v6) == rep_c
+
+
 def summarize(rows, edges):
     pairs = [(r["shot_bin"], r["model_bin"]) for r in rows if r.get("model_bin") is not None and r.get("shot_bin") is not None]
     if not pairs:
@@ -687,7 +825,7 @@ def summarize(rows, edges):
     m = np.array([p[1] for p in pairs])
     n = len(pairs)
     mids = [(edges[i] + edges[i + 1]) / 2 if i + 1 < len(edges) else edges[i] * 1.2 for i in range(len(edges))]
-    mid = lambda k: 0.0 if k < 0 else mids[k]   # noqa: E731
+    mid = lambda k: 0.0 if k < 0 else mids[k]   # noqa: E731  (below the first edge = 0)
     return {"n": n, "same_class": float((s == m).mean()), "within_one": float((np.abs(s - m) <= 1).mean()),
             "model_higher": float((m > s).mean()), "model_lower": float((m < s).mean()),
             "bias_mid_cm": float(np.mean([mid(b) - mid(a) for a, b in pairs])),
@@ -776,7 +914,12 @@ def cmd_run(a):
         if refp:
             a_ = np.array(refp)
             snow = a_[:, 1] >= 0
-            L += [f"**Selbsttest Ablesen:** Screenshot-Stufe gegen die exakten SLF-Werte derselben Karte: "
+            src = "IMIS-Messwerte derselben Stunde" if it["kind"] == "stations" else "exakten SLF-Werte derselben Karte"
+            same_ = (a_[:, 0] == a_[:, 1]).mean()
+            if same_ < 0.6:
+                L += [f"**Ablesen unzuverlässig** ({same_:.0%} gleiche Stufe wie die {src}): "
+                      "die Zahlen unten nicht als Modellurteil verwenden. Grösser zoomen oder die Schnittstelle nutzen.", ""]
+            L += [f"**Selbsttest Ablesen:** Screenshot-Stufe gegen die {src}: "
                   f"{(a_[:, 0] == a_[:, 1]).mean():.0%} gleiche Stufe, {(np.abs(a_[:, 0] - a_[:, 1]) <= 1).mean():.0%} ±1 "
                   f"(nur Zellen mit Schnee: {(a_[snow, 0] == a_[snow, 1]).mean():.0%} gleich, n={int(snow.sum())}).", ""]
             allres[it["file"]]["reference_check"] = {"same": float((a_[:, 0] == a_[:, 1]).mean()), "n": len(refp)}
@@ -793,24 +936,22 @@ def cmd_run(a):
                 L += [f"| {r['id']} {r['label']} | {r.get('elev') or '–'} | {bin_label(r['shot_bin'], edges)} | {r['model']:.0f} cm |" for r in worst]
                 L.append("")
         elif it["kind"] == "obs_symbols":
-            def coarse6(c):
-                if not c or c == "none":
-                    return c
-                return "powder" if c.startswith("powder") else {"hard": "hard", "crust": "crust", "corn": "corn_wet", "wet": "corn_wet",
-                                                                "thin_cover": "thin_none", "loose_faceted": "powder"}.get(c, c)
             leg = it.get("symbol_legend") or {}
-            L += ["| Symbol | gemeldet (grob) | Ort | Variant A ski6 | ski18 | Wind | passt (ski6) |", "|---|---|---|---|---|---|---|"]
+            L += ["| Symbol | gemeldet (grob) | Ort | Variant A ski6 | ski18 | Wind | passt |", "|---|---|---|---|---|---|---|"]
             hits = []
             for r in rows:
-                rep_c = (leg.get(r["symbol"]) or {}).get("coarse") if isinstance(leg.get(r["symbol"]), dict) else None
-                ok = None if not rep_c else (coarse6(r["va_ski6"]) == rep_c)
+                if "hit" in r:
+                    rep_c, ok = r["reported"], r["hit"]
+                else:
+                    rep_c = (leg.get(r["symbol"]) or {}).get("coarse") if isinstance(leg.get(r["symbol"]), dict) else None
+                    ok = None if not rep_c else (coarse6(r["va_ski6"]) == rep_c)
                 if ok is not None:
                     hits.append(ok)
                 L.append(f"| {r['symbol']} | {rep_c or '?'} | {r['lat']:.3f}, {r['lon']:.3f} | {r['va_ski6']} | {r['va_ski18']} | "
                          f"{r['va_wind']} | {'–' if ok is None else '✓' if ok else '✕'} |")
             L.append("")
             if hits:
-                L += [f"Treffer ski6: {sum(hits)}/{len(hits)}.", ""]
+                L += [f"Treffer: {sum(hits)}/{len(hits)} ({sum(hits) / len(hits):.0%}).", ""]
             else:
                 L += ["Die Symbole werden erkannt, aber ihre Bedeutung fehlt: Legende im Manifest unter `symbol_legend` eintragen, "
                       "z. B. `\"cyan\": {\"name\": \"Pulver\", \"coarse\": \"powder\"}` (grob: powder, wind, crust, hard, corn_wet, thin_none).", ""]

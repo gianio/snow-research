@@ -52,7 +52,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="dash_data")
     ap.add_argument("--site", default=os.environ.get("MODEL_SITE", ""))
-    ap.add_argument("--screencheck", help="screencheck results folder (results.json)")
+    ap.add_argument("--screencheck", nargs="*", help="screencheck results folders (results.json)")
     a = ap.parse_args()
     if not a.site:
         sys.exit("set MODEL_SITE")
@@ -200,54 +200,91 @@ def main():
                         "pf_at_max_share": r(sum(1 for x in pf if x >= 1.999) / len(pf), 3) if pf else None,
                         "weather_points": len(pf)}])
 
-    # ── screenshots (screencheck) ──
+    # ── screenshots (screencheck), every result set given ──
     shots, obs, surf = [], [], []
-    if a.screencheck and Path(a.screencheck, "results.json").exists():
-        res = json.loads(Path(a.screencheck, "results.json").read_text())
-        names = {"IMG_4746": ("Neuschnee 24 h, Stationen", "WhiteRisk", "21.11. 18:30"),
-                 "IMG_4745": ("Schneehöhe, Stationen", "WhiteRisk", "21.11. 18:30"),
-                 "IMG_4747": ("Neuschneekarte 24 h", "WhiteRisk", "20.–21.11."),
-                 "IMG_4748": ("Schneehöhenkarte", "WhiteRisk-App", "21.11. 06 UTC"),
-                 "IMG_4744": ("Neuschnee beobachtet", "SLF Pro", "19.11."),
-                 "IMG_4743": ("Schneeoberfläche", "SLF Pro", "16.11.")}
+    superseded = {"IMG_4743_surface_observed.png", "IMG_4744_hn_observed.png"}   # same days again, with legend, in the doc set
+    for d in a.screencheck or []:
+        d = Path(d)
+        if not (d / "results.json").exists():
+            continue
+        res = json.loads((d / "results.json").read_text())
+        mf = HERE / "screencheck" / "inbox" / d.name / "manifest.json"
+        meta_ = {x["file"]: x for x in json.loads(mf.read_text())} if mf.exists() else {}
         for f, v in res.items():
-            key = f[:8]
-            prod, src, when = names.get(key, (f, "", ""))
+            it = meta_.get(f, {})
             s = v.get("summary") or {}
-            shots.append({"product": prod, "source": src, "when": when, "n": s.get("n") or len(v.get("rows", [])),
+            rc = (v.get("reference_check") or {}).get("same")
+            shots.append({"product": it.get("title") or f, "file": f, "set": d.name, "kind": it.get("kind"),
+                          "n": s.get("n") or len(v.get("rows", [])),
                           "same_class": r(s.get("same_class"), 3), "within_one": r(s.get("within_one"), 3),
                           "model_higher": r(s.get("model_higher"), 3), "model_lower": r(s.get("model_lower"), 3),
-                          "bias_mid_cm": r(s.get("bias_mid_cm"), 1),
-                          "reading_check": r((v.get("reference_check") or {}).get("same"), 3)})
-            if key == "IMG_4744":
-                edges = [1, 10, 20, 30, 40, 60, 80, 100]
-                lab = lambda k: "0" if k is None or k < 0 else (f"{edges[k]}–{edges[k + 1]}" if k + 1 < len(edges) else f"≥{edges[k]}")  # noqa: E731
+                          "bias_mid_cm": r(s.get("bias_mid_cm"), 1), "reading_check": r(rc, 3),
+                          "reliable": None if rc is None else rc >= 0.6})
+            if f in superseded:
+                continue
+            day = (it.get("valid_local") or "")[:10]
+            if it.get("kind") == "obs_points":
+                leg = {"slf_obs_hn": [0, 5, 10, 20, 30, 40, 60, 80, 100], "wr_hn": [1, 10, 20, 30, 40, 60, 80, 100]}[it.get("legend", "wr_hn")]
+                lab = lambda k, e=leg: "–" if k is None else ("< %g" % e[0] if k < 0 else (f"{e[k]}–{e[k + 1]}" if k + 1 < len(e) else f"≥{e[k]}"))  # noqa: E731
                 for x in v["rows"]:
-                    obs.append({"id": x["id"], "lat": r(x["lat"], 4), "lon": r(x["lon"], 4), "observed_class": lab(x.get("shot_bin")),
-                                "model_cm": r(x.get("model"), 1), "model_class": lab(x.get("model_bin")),
-                                "same": x.get("shot_bin") == x.get("model_bin")})
-            if key == "IMG_4743":
+                    if x.get("model_bin") is None:
+                        continue
+                    obs.append({"key": f"{day}/{x['id']}", "day": day, "lat": r(x["lat"], 4), "lon": r(x["lon"], 4),
+                                "observed_class": lab(x.get("shot_bin")), "model_cm": r(x.get("model"), 1),
+                                "model_class": lab(x.get("model_bin")), "class_diff": x["model_bin"] - x["shot_bin"]})
+            if it.get("kind") == "obs_symbols" and it.get("legend_roi"):
                 for x in v["rows"]:
-                    surf.append({"id": x["id"], "symbol": x["symbol"], "lat": r(x["lat"], 4), "lon": r(x["lon"], 4),
-                                 "va_ski6": x.get("va_ski6"), "va_ski18": x.get("va_ski18"), "va_wind": x.get("va_wind")})
-    save("screenshots", shots, [{"label": "Werkzeug", "value": "screencheck/screencheck.py (Farbstufen abgelesen, georeferenziert)"}])
-    save("observer_hn", obs)
-    save("surface_obs", surf, [{"label": "Hinweis", "value": "Bedeutung der Symbole fehlt noch (Legende)"}])
+                    surf.append({"key": f"{day}/{x['id']}", "day": day, "symbol": x["symbol"], "observed": x.get("reported"),
+                                 "lat": r(x["lat"], 4), "lon": r(x["lon"], 4), "va_ski6": x.get("va_ski6"),
+                                 "va_ski18": x.get("va_ski18"), "va_wind": x.get("va_wind"), "hit": x.get("hit")})
+    save("screenshots", shots, [{"label": "Werkzeug", "value": "screencheck/screencheck.py (Farbstufen abgelesen, georeferenziert)"},
+                                {"label": "Ablesen geprüft", "value": "Abgelesene Stufe gegen exakte SLF-Karte bzw. IMIS-Messung; unter 60 % unzuverlässig"}])
+    save("observer_hn", obs, [{"label": "Legende", "value": "SLF Pro: 0–5, 5–10, 10–20, 20–30, 30–40, 40–60, 60–80, 80–100, >100 cm"}])
+    save("surface_obs", surf, [{"label": "Treffer", "value": "Neuschnee/kantig → Pulver; feucht → Sulz/nass; tragfähig/brüchig → Kruste/hart; "
+                                "Wind → Windlayer oder ski18-Wind; Oberflächenreif → ski18 surface_hoar"}])
+
+    # ── one set of points for the map, and the same as GeoJSON for the app ──
+    pts = []
+    for x in hs_rows:
+        pts.append({"layer": "hs", "day": x["time"][:10], "id": x["station"], "label": f"{x['station']} {x['label']}", "lat": x["lat"],
+                    "lon": x["lon"], "elev": x["elev"], "observed": x["measured"], "model": x["model"], "diff": x["diff"], "unit": "cm",
+                    "hit": None, "note": "Holdout" if x["holdout"] else "zur Korrektur genutzt"})
+    for x in hn_rows:
+        s_ = st.get(x["station"], {})
+        pts.append({"layer": "hn24", "day": x["to"][:10], "id": x["station"], "label": f"{x['station']} {x['label']}", "lat": s_.get("lat"),
+                    "lon": s_.get("lon"), "elev": x["elev"], "observed": x["measured_gain"], "model": x["model_newsnow"], "diff": x["diff"],
+                    "unit": "cm", "hit": None, "note": "gemessen = Zunahme der Schneehöhe (untere Grenze)"})
+    for x in obs:
+        pts.append({"layer": "obs_hn", "day": x["day"], "id": x["key"], "label": f"Beobachter {x['day']}", "lat": x["lat"], "lon": x["lon"],
+                    "elev": None, "observed": x["observed_class"], "model": x["model_class"], "diff": x["class_diff"], "unit": "Stufen",
+                    "hit": x["class_diff"] == 0, "note": f"Modell {x['model_cm']} cm"})
+    for x in surf:
+        pts.append({"layer": "surface", "day": x["day"], "id": x["key"], "label": f"Oberfläche {x['day']}", "lat": x["lat"], "lon": x["lon"],
+                    "elev": None, "observed": x["symbol"], "model": f"{x['va_ski6']} / {x['va_ski18']}", "diff": None, "unit": "",
+                    "hit": x["hit"], "note": f"Wind: {x['va_wind']}"})
+    save("map_points", [p_ for p_ in pts if p_["lat"] is not None])
+    (out / "validation_points.geojson").write_text(json.dumps({"type": "FeatureCollection", "generated": made, "model_run": sm["version"],
+        "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [p_["lon"], p_["lat"]]},
+                      "properties": {k: v for k, v in p_.items() if k not in ("lat", "lon")}} for p_ in pts if p_["lat"] is not None]},
+        ensure_ascii=False))
+    border = json.loads((HERE / "screencheck" / "ch_border.json").read_text())
+    (out / "border.json").write_text(json.dumps({"type": "FeatureCollection", "attribution": "© swisstopo", "features": [
+        {"type": "Feature", "properties": {"name": "Schweiz"}, "geometry": {"type": "MultiPolygon", "coordinates": [[r_] for r_ in border["rings"]]}}]}))
 
     # ── coverage of the requested data types ──
     n = lambda rows, per=None: sum(1 for x in rows if per is None or x.get("period") == per)  # noqa: E731
     cov = [
-        {"data": "Lokale Beobachter-Messungen", "status": "teilweise", "source": "SLF Pro Screenshot 19.11.", "rows": len(obs),
-         "next": "Bilder aus dem Dokument einzeln schicken (Drive-Ordner oder Chat)"},
-        {"data": "Schneehöhe-Messung", "status": "drin", "source": "IMIS-Schnittstelle + WhiteRisk Screenshot", "rows": len(hs_rows),
-         "next": "Beobachterstationen über Screenshots ergänzen"},
+        {"data": "Lokale Beobachter-Messungen", "status": "drin", "source": "SLF Pro Screenshots 19.–22.11.", "rows": len(obs),
+         "next": "regelmässig neue Screenshots"},
+        {"data": "Schneehöhe-Messung", "status": "drin", "source": "IMIS-Schnittstelle (Desktop-Screenshot: Ablesen unzuverlässig)", "rows": len(hs_rows),
+         "next": "für manuelle Stationen grösser gezoomte Screenshots"},
         {"data": "Neuschnee 24 h", "status": "drin", "source": "SLF-Karte HN1D + IMIS-Zunahme + Screenshot", "rows": n(days_rows, "HN1D") + len(hn_rows),
          "next": "Beobachter-Messbretter über Screenshots"},
         {"data": "Neuschnee 48 h", "status": "drin", "source": "SLF-Karte HN2D", "rows": n(days_rows, "HN2D"), "next": "–"},
-        {"data": "Neuschnee 72 h", "status": "drin", "source": "SLF-Karte HN3D", "rows": n(days_rows, "HN3D"), "next": "–"},
-        {"data": "Neuschneekarte 72 h", "status": "drin", "source": "SLF-Karte HN3D (exakt, ohne Screenshot)", "rows": n(days_rows, "HN3D"), "next": "–"},
-        {"data": "Schneeoberfläche", "status": "teilweise", "source": "SLF Pro Screenshot 16.11.", "rows": len(surf),
-         "next": "Legende der Symbole schicken"},
+        {"data": "Neuschnee 72 h / 3 und 7 Tage", "status": "drin", "source": "SLF-Karte HN3D; Stationsbilder 3/7 Tage nur als Screenshot (unsicher)", "rows": n(days_rows, "HN3D"), "next": "–"},
+        {"data": "Neuschneekarte 72 h", "status": "drin", "source": "SLF-Karte HN3D exakt + Screenshot 22.11. (Ablesen 82 % gleich)", "rows": n(days_rows, "HN3D"), "next": "–"},
+        {"data": "Schneeoberfläche", "status": "drin", "source": "SLF Pro Screenshots 17.–22.11. mit Legende", "rows": len(surf),
+         "next": "mehr Tage sammeln"},
     ]
     save("coverage", cov)
 
