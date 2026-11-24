@@ -4,12 +4,11 @@
 Each observation (snowval/store.py) is matched to the nearest model cell
 and compared where the model has the same quantity:
 
-  hn24 / hn72            slf_hn maps, powderguide forecast       vs model new snow over the same window
+  hn24 / hn72            slf_hn maps                             vs model new snow over the same window
   hs_gain24              derived here from IMIS HS (06 -> 06 UTC)  vs model new snow 24 h
                          (a lower bound: settling eats part of it)
   snow_cm_new            gipfelbuch "20 cm Neuschnee"           vs model new snow of the 72 h before the tour
-  snow_period            snow-forecast.com forecast periods      vs model new snow over the period
-  hs, hs_reported        IMIS, ExoLabs, resort reports, SLF map  vs model snow depth -- only if the model file
+  hs                     IMIS, SLF map                           vs model snow depth -- only if the model file
   snowline_m             gipfelbuch                              has a depth layer (--hs-key, default: auto)
 
 Points whose height differs from the model cell by more than --max-dz m
@@ -157,7 +156,7 @@ def main():
         dz = None if r["elev"] is None else r["elev"] - ez
         t0, t1 = ts(r["valid_from"]), ts(r["valid_to"])
         var, mv = r["var"], None
-        height_sensitive = r["source"] in ("imis", "snowforecast")
+        height_sensitive = r["source"] in ("imis",)
         if height_sensitive and dz is not None and abs(dz) > a.max_dz:
             continue
         if var in ("hn24", "hn48", "hn72", "hs_gain24", "snow_period"):

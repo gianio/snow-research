@@ -1,27 +1,17 @@
 #!/usr/bin/env python3
-"""Compare the model's new snow with two outside sources, cell by cell.
+"""Compare the model's new snow with the SLF's measured new snow, cell by cell.
 
-  1. PowderGuide (map.powderguide.com, ICON-EU, variable snow_gsp__lsfwe):
-     the FORECAST new snow of the next day (24 h sum, 10:1 -- 1 mm = 1 cm),
-     read from its colour tiles and turned back into cm with its colour bar.
-  2. WhiteRisk / SLF (whiterisk.ch snow maps, HN1D): the MEASURED new snow
-     of the last 24 h (interpolated station network), read from the
-     value-encoded image the site uses itself.
+  WhiteRisk / SLF (whiterisk.ch snow maps, HN1D): the MEASURED new snow of
+  the last 24 h (interpolated station network), read from the value-encoded
+  image the site uses itself.
 
-The model is read from its site's data blob (data/latest.json): the
-hourly new snow per 1 km cell, summed over the same 24 h as the source.
+The model is read from its site's data blob (data/latest.json): the hourly
+new snow per 1 km cell, summed over the same 24 h. Only cells the SLF map
+covers count. Statistics on the cells and on 10 km blocks: bias, MAE, RMSE,
+Pearson r, Spearman rho, share within ±2 cm / ±50 %, detection scores for
+>=1 / 5 / 10 / 20 cm, class agreement, per elevation band and region.
 
-Every source is sampled at the centre of each Modell cell; only cells the
-SLF map covers (its data mask = Switzerland) count, so both comparisons use
-one area. Statistics, on the cells and once more on 10 km blocks (a fairer
-scale for a ~7 km forecast model):
-  bias, MAE, RMSE, Pearson r, Spearman rho, share within ±2 cm / ±50 %,
-  detection scores for >=1 / 5 / 10 / 20 cm (POD, FAR, CSI, frequency bias),
-  agreement of the snow-scale classes, and everything again per elevation
-  band (cell height) and per region of Switzerland.
-
-    python tools/compare_newsnow.py --out report_dir [--pg-day DAY048]
-        [--pg-run 20261117] [--hn-date 2026-11-17] [--site URL]
+    python compare_newsnow.py --out report_dir [--hn-date 2026-11-17] [--site URL]
 
 Writes report.md, report.json and maps.png into the output folder.
 """
@@ -43,7 +33,6 @@ from PIL import Image
 
 # the model site is never written into this file: pass --site or set MODEL_SITE
 SITE = os.environ.get("MODEL_SITE", "")
-PG_TILES = "https://v2.tiles.powderguide.com/?p="
 SLF_HN = "https://snow-maps-hs.slf.ch/public/hn/map/{period}/{date}/encoded"
 # a plain client name: nothing in the requests says who runs the comparison
 UA = {"User-Agent": "Mozilla/5.0 (compatible; map-compare/1.0)"}
@@ -121,50 +110,6 @@ def sample_slf(slf, lat, lon):
     ok = (c >= 0) & (c < w) & (r >= 0) & (r < h)
     out = np.full(X.shape, np.nan, np.float32)
     out[ok] = slf["val"][r[ok], c[ok]]
-    return out
-
-
-# ── PowderGuide forecast (colour tiles) ─────────────────────────────────────
-def load_pg_cbar():
-    cb = get(PG_TILES + "cbars_en.json").json()["snow_gsp__lsfwe"]
-    pts = [(c["r"], c["g"], c["b"], float(c["v"])) for c in cb if isinstance(c.get("v"), (int, float))]
-    pts = [p for p in pts if p[:3] != (0, 0, 0)]
-    return np.array([p[:3] for p in pts], np.float32), np.array([p[3] for p in pts], np.float32)
-
-
-def pg_plot(run, day, region="eur"):
-    plots = get(PG_TILES + "plots_snow_gsp__lsfwe.json").json()["plots"]
-    for p in plots:
-        if p["date"] == run and p["day"] == day and p["region"] == region:
-            return p
-    have = sorted({(p["date"], p["day"]) for p in plots if p["region"] == region})
-    raise SystemExit(f"PowderGuide has no {region} plot for run {run} / {day}; available e.g. {have[-6:]}")
-
-
-def load_pg(plot, lat, lon, z=6):
-    cols, vals = load_pg_cbar()
-    X, Y = merc(*np.meshgrid(lon, lat))
-    n = 2 ** z
-    size = 2 * math.pi * R_EARTH
-    fx = (X + size / 2) / size * n
-    fy = (size / 2 - Y) / size * n
-    tiles = {}
-    out = np.full(X.shape, np.nan, np.float32)
-    for tx, ty in {(int(a), int(b)) for a, b in zip(fx.ravel(), fy.ravel())}:
-        url = PG_TILES + plot["tileUrlPath"].format(z=z, x=tx, y=ty) + ".png"
-        im = np.asarray(Image.open(io.BytesIO(get(url).content)).convert("RGBA")).astype(np.float32)
-        tiles[(tx, ty)] = im
-    for (tx, ty), im in tiles.items():
-        sel = (fx.astype(int) == tx) & (fy.astype(int) == ty)
-        px = np.clip(((fx[sel] - tx) * 256).astype(int), 0, 255)
-        py = np.clip(((fy[sel] - ty) * 256).astype(int), 0, 255)
-        rgba = im[py, px]
-        v = np.zeros(len(px), np.float32)                      # transparent = below the scale (< 1 cm)
-        a = rgba[:, 3] > 127
-        if a.any():
-            d = ((rgba[a, None, :3] - cols[None]) ** 2).sum(-1)
-            v[a] = vals[d.argmin(1)]
-        out[sel] = v
     return out
 
 
@@ -304,8 +249,6 @@ def maps_png(path, panels, lat, lon):
     fig.savefig(path, dpi=110)
 
 
-PG_MAP = ("https://map.powderguide.com/en/?b=&c%5Blng%5D=8.2&c%5Blat%5D=46.7&date={run}&day={day}"
-          "&maskStr=nomask&model=&p=0&poi=cReports&poiTime=30days&t=&varName=snow_gsp__lsfwe&z=7")
 WR_MAP = "https://whiterisk.ch/de/conditions/snow-maps/new_snow"
 HIST_COLS = ["date", "source", "window_start", "window_end", "n", "mean_ref", "mean_sm", "bias", "mae", "rmse",
              "pearson_10km", "csi1", "csi5", "csi10", "fbias5", "sm_version", "ns_settle"]
@@ -364,9 +307,6 @@ def main():
     ap.add_argument("--out", default="compare_out")
     ap.add_argument("--site", default=SITE)
     ap.add_argument("--sm-file", help="read the model from a local *.json.gz instead of the site")
-    ap.add_argument("--pg-run", help="PowderGuide run date YYYYMMDD (default: the newest)")
-    ap.add_argument("--pg-day", default="auto",
-                    help="PowderGuide 24 h field, e.g. DAY048 (= day after the run day); auto = tomorrow (UTC) from the chosen run")
     ap.add_argument("--hn-date", help="SLF HN1D map date YYYY-MM-DD (default: today)")
     ap.add_argument("--history", help="CSV to append the day's key numbers to (and summarise in the report)")
     a = ap.parse_args()
@@ -390,56 +330,27 @@ def main():
     res_slf = compare(slf_g, np.where(mask, sm_slf, np.nan), sm["elev"], lat, lon)
     report["whiterisk"] = {"window": [t0.isoformat(), t1.isoformat()], **res_slf}
 
-    # PowderGuide forecast for the next day
-    plots = get(PG_TILES + "plots_snow_gsp__lsfwe.json").json()["plots"]
-    run = a.pg_run or max(p["date"] for p in plots if p["region"] == "eur")
-    if a.pg_day == "auto":
-        r_d = dt.datetime.strptime(run, "%Y%m%d").date()
-        lead = ((dt.datetime.now(dt.timezone.utc).date() + dt.timedelta(days=2)) - r_d).days * 24
-        a.pg_day = f"DAY{min(120, max(48, lead)):03d}"
-    plot = pg_plot(run, a.pg_day)
-    lead = int("".join(ch for ch in a.pg_day if ch.isdigit()))
-    r0 = dt.datetime.strptime(run, "%Y%m%d").replace(tzinfo=dt.timezone.utc)
-    p1 = r0 + dt.timedelta(hours=lead)
-    p0 = p1 - dt.timedelta(hours=24)
-    pg = load_pg(plot, lat, lon)
-    sm_pg = sm_window(sm, p0, p1)
-    res_pg = compare(np.where(mask, pg, np.nan), np.where(mask, sm_pg, np.nan), sm["elev"], lat, lon)
-    report["powderguide"] = {"run": run, "field": a.pg_day, "model": plot["model"], "window": [p0.isoformat(), p1.isoformat()], **res_pg}
-
     (out / "report.json").write_text(json.dumps(report, indent=1, default=str))
-    maps_png(out / "maps.png", [(f"PowderGuide {plot['model']} {p0:%d.%m.} (Prognose)", np.where(mask, pg, np.nan), np.where(mask, sm_pg, np.nan)),
-                                (f"SLF/WhiteRisk HN1D bis {t1:%d.%m. %H} UTC (gemessen)", slf_g, np.where(mask, sm_slf, np.nan))], lat, lon)
+    maps_png(out / "maps.png", [(f"SLF/WhiteRisk HN1D bis {t1:%d.%m. %H} UTC (gemessen)", slf_g, np.where(mask, sm_slf, np.nan))], lat, lon)
     L = ["# Neuschnee-Vergleich Modell", "",
          f"Erstellt {dt.datetime.now(dt.timezone.utc):%Y-%m-%d %H:%M} UTC · Modell-Lauf {sm['version']} (generiert {sm['generated']})", "",
          "Gebiet: alle 1-km-Zellen von Modell, die die SLF-Neuschneekarte abdeckt (= Schweiz). Jede Quelle wird in der Mitte "
          "jeder Zelle abgelesen. Zusätzlich auf 10-km-Blöcken gemittelt, weil ein Modell mit ~7 km Maschenweite einzelne 1-km-Zellen nicht auflösen kann.", ""]
-    L += section(f"1 · PowderGuide – Prognose für den {p0:%d.%m.%Y}",
-                 f"PowderGuide {plot['model'].upper()}, Lauf {run} 00 UTC, Feld `{a.pg_day}` = Neuschnee-Summe {p0:%d.%m. %H}–{p1:%d.%m. %H} UTC, "
-                 "Annahme 1 mm Niederschlag als Schnee = 1 cm (Dichte 100 kg/m³). Aus den Farbkacheln (Zoom 6, ~1.7 km/Pixel) über die Farbskala "
-                 "zurückgerechnet; < 1 cm ist dort transparent und zählt als 0. Modell: Summe der Stundenwerte im gleichen Zeitraum.",
-                 res_pg, "PowderGuide")
-    L += section(f"2 · WhiteRisk / SLF – gemessener Neuschnee bis {t1:%d.%m.%Y %H:%M} UTC",
+    L += section(f"WhiteRisk / SLF – gemessener Neuschnee bis {t1:%d.%m.%Y %H:%M} UTC",
                  f"SLF-Neuschneekarte HN1D (gültig {t1:%d.%m. %H:%M} UTC, 24 h aus dem Messnetz interpoliert), Werte aus dem codierten Bild der Seite "
                  f"(Rot = Wert auf der Skala 1–100 cm, Blau = Daten vorhanden). Modell: Summe {t0:%d.%m. %H}–{t1:%d.%m. %H} UTC "
                  "(Rückblick = MeteoSchweiz-Archiv, kein Vorhersagetest).",
                  res_slf, "SLF")
     L += ["## So siehst du dasselbe bei den Quellen", "",
-          f"- **PowderGuide:** [Karte öffnen]({PG_MAP.format(run=run, day=a.pg_day)}) – Variable «Neuschnee» (`snow_gsp__lsfwe`), "
-          f"Modell ICON-EU, Lauf {r0:%d.%m.%Y}, Zeitraum `{a.pg_day}` = 24 h bis {p1:%d.%m. %H} UTC, keine Maske. "
-          f"Falls die Seite den Zeitraum nicht übernimmt: im Zeitregler den {p0:%d.%m.} mit «24 h» wählen.",
           f"- **WhiteRisk:** [{WR_MAP}]({WR_MAP}) – Neuschnee, Zeitraum «1 Tag», Datum {t1:%d.%m.%Y} "
           f"(gemessen bis {t1:%H:%M} UTC). Das ausgewertete Bild: {SLF_HN.format(period='HN1D', date=hn_date)}",
           f"- **Modell:** Ebene Neuschnee, Zeitraum wie oben; Werte nach 24 h Setzung (Faktor {sm['settle']:.3f}).",
           ""]
     if a.history:
-        rows = hist_rows(hn_date, "PowderGuide", res_pg, (p0.isoformat(), p1.isoformat()), sm) \
-            + hist_rows(hn_date, "SLF", res_slf, (t0.isoformat(), t1.isoformat()), sm)
+        rows = hist_rows(hn_date, "SLF", res_slf, (t0.isoformat(), t1.isoformat()), sm)
         L += hist_section(hist_update(a.history, rows))
     L += ["## Hinweise zur Deutung", "",
           "- Bias > 0: Modell zeigt mehr Neuschnee als die Quelle.",
-          "- PowderGuide rechnet 1 mm = 1 cm (10:1); Modell rechnet mit einer temperaturabhängigen Neuschneedichte "
-          "(bei Kälte mehr, bei Nässe weniger cm pro mm). Ein Teil der Abweichung ist also Definitionssache, nicht Modellfehler.",
           "- Die SLF-Karte ist gemessen und flächig interpoliert; über 2500 m und abseits der Stationen ist sie selbst unsicher.",
           "- Bei wenig Schnee im ganzen Gebiet sind r und ρ kaum aussagekräftig – dann zählen MAE und die Erkennung der Schwellen.",
           "", "Karten: `maps.png` · Rohzahlen: `report.json`", ""]
