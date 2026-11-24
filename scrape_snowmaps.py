@@ -6,21 +6,13 @@ Every source is read at the same points: a regular grid over Switzerland
 Values go to the observation store (snowval/store.py), one row per
 source / variable / time / coordinate.
 
-Sources (choose with --sources; default slf_hn,slf_hs,imis,snowforecast):
+Sources (choose with --sources; default slf_hn,slf_hs,imis):
   slf_hn       SLF/WhiteRisk new-snow map HN1D (+HN3D), measured, past days
   slf_hs       SLF snow-depth map -- only if SLF_HS_URL is set (template with {date})
   imis         SLF IMIS stations: snow depth HS + air temperature, last 24 h (hourly)
-  powderguide  PowderGuide ICON-D2 / ICON-EU forecast: new snow 24 h (DAY048..120)
-               and snow depth (06 UTC of each day), newest run
-  exolabs      PowderGuide's ExoLabs snow-depth layer (satellite + model analysis)
-               -- powderguide / exolabs: their tile server's robots.txt currently
-               disallows all robots, so these two stop with a PermissionError.
-  snowforecast snow-forecast.com resorts in config/snowforecast_resorts.txt:
-               forecast snowfall per period at top / mid / bottom and the
-               reported top / bottom snow depth
 
     python scrape_snowmaps.py --data data [--days-back 3] [--grid-km 5]
-        [--sources slf_hn,imis,powderguide] [--cache .cache]
+        [--sources slf_hn,imis] [--cache .cache]
 
 --days-back N re-reads the SLF maps of the last N days (backfill: e.g. 60).
 """
@@ -28,14 +20,11 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import html
 import io
 import json
 import math
 import os
-import re
 import sys
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -50,9 +39,6 @@ R_EARTH = 6378137.0
 CH_BBOX = (45.80, 5.90, 47.85, 10.55)       # lat0, lon0, lat1, lon1
 SLF = "https://snow-maps-hs.slf.ch/public"
 IMIS = "https://measurement-api.slf.ch/public/api/imis"
-PG = "https://v2.tiles.powderguide.com/?p="
-PG_REF = "https://map.powderguide.com/"
-SF = "https://www.snow-forecast.com"
 SLF_REF = "https://whiterisk.ch/"
 
 
@@ -204,201 +190,9 @@ def do_imis(net, stations, data):
     return n
 
 
-# ── PowderGuide colour tiles ─────────────────────────────────────────────────
-_cbars = {}
-
-
-def pg_cbar(net, var):
-    if not _cbars:
-        _cbars.update(net.get(PG + "cbars_en.json", light=True, referer=PG_REF).json())
-    pts = [(c["r"], c["g"], c["b"], float(c["v"])) for c in _cbars[var] if isinstance(c.get("v"), (int, float))]
-    pts = [p for p in pts if p[:3] != (0, 0, 0)]     # black = outside the scale at either end
-    return np.array([p[:3] for p in pts], np.float32), np.array([p[3] for p in pts], np.float32)
-
-
-def pg_sample(net, tile_path, var, lat, lon, z=7):
-    cols, vals = pg_cbar(net, var)
-    X, Y = merc(lon, lat)
-    n = 2 ** z
-    size = 2 * math.pi * R_EARTH
-    fx = (X + size / 2) / size * n
-    fy = (size / 2 - Y) / size * n
-    out = np.full(len(lat), np.nan, np.float32)
-    for tx, ty in sorted({(int(a), int(b)) for a, b in zip(fx, fy)}):
-        url = PG + tile_path.format(z=z, x=tx, y=ty) + ".png"
-        try:
-            im = np.asarray(Image.open(io.BytesIO(net.get(url, light=True, referer=PG_REF).content)).convert("RGBA")).astype(np.float32)
-        except Exception:                               # noqa: BLE001 -- tile outside the domain
-            continue
-        sel = (fx.astype(int) == tx) & (fy.astype(int) == ty)
-        px = np.clip(((fx[sel] - tx) * 256).astype(int), 0, 255)
-        py = np.clip(((fy[sel] - ty) * 256).astype(int), 0, 255)
-        rgba = im[py, px]
-        v = np.zeros(len(px), np.float32)               # transparent = below the scale
-        a = rgba[:, 3] > 127
-        if a.any():
-            d = ((rgba[a, None, :3] - cols[None]) ** 2).sum(-1)
-            k = d.argmin(1)
-            vv = vals[k].copy()
-            vv[np.sqrt(d[np.arange(len(k)), k]) > 40] = np.nan   # border / label pixels
-            v[a] = vv
-        out[sel] = v
-    return out
-
-
-def pg_plots(net, var):
-    return net.get(PG + f"plots_{var}.json", light=True, referer=PG_REF, cache=False).json()["plots"]
-
-
-def pg_pick(plots, model="icon-eu"):
-    e = [p for p in plots if p["region"] == "eur" and p.get("maskStr", "nomask") == "nomask" and p["model"] == model]
-    if not e:
-        return None, []
-    run = max(p["date"] for p in e)
-    return run, [p for p in e if p["date"] == run]
-
-
-def do_powderguide(net, pts, data, z):
-    n = 0
-    # new snow, 24 h sums: DAY048 = the 24 h ending run + 48 h
-    run, plots = pg_pick(pg_plots(net, "snow_gsp__lsfwe"))
-    r0 = dt.datetime.strptime(run, "%Y%m%d").replace(tzinfo=UTC)
-    rows = []
-    for day in sorted({p["day"] for p in plots if re.fullmatch(r"DAY\d{3}", p["day"])}):
-        p = next(p for p in plots if p["day"] == day)
-        lead = int(day[3:])
-        src = p.get("patches") or []
-        path, model = (src[0]["tileUrlPath"], src[0]["model"]) if src else (p["tileUrlPath"], p["model"])
-        v = pg_sample(net, path, "snow_gsp__lsfwe", pts["lat"], pts["lon"], z)
-        t1 = r0 + dt.timedelta(hours=lead)
-        rows += rows_for(pts, v, kind="forecast", unit="cm", issued=iso(r0), lead_h=lead,
-                         valid_from=iso(t1 - dt.timedelta(hours=24)), valid_to=iso(t1),
-                         ref=f"powderguide {model} snow_gsp__lsfwe {run} {day} (1 mm = 1 cm)")
-    store.write(data, "powderguide", "hn24", r0.date().isoformat(), rows)
-    n += len(rows)
-    # snow depth, 06 UTC of each day (+ the analysis at 00)
-    run, plots = pg_pick(pg_plots(net, "h_snow__sde"))
-    r0 = dt.datetime.strptime(run, "%Y%m%d").replace(tzinfo=UTC)
-    rows = []
-    for p in sorted(plots, key=lambda p: p["day"]):
-        m = re.fullmatch(r"E?DAY(\d{3})", p["day"])
-        if not m:
-            continue
-        lead = int(m.group(1))
-        if lead != 0 and lead % 24 != 6:
-            continue
-        src = p.get("patches") or []
-        path, model = (src[0]["tileUrlPath"], src[0]["model"]) if src else (p["tileUrlPath"], p["model"])
-        v = pg_sample(net, path, "h_snow__sde", pts["lat"], pts["lon"], z) * 100   # m -> cm
-        t = r0 + dt.timedelta(hours=lead)
-        rows += rows_for(pts, v, kind="forecast" if lead else "analysis", unit="cm", issued=iso(r0), lead_h=lead,
-                         valid_from=iso(t), valid_to=iso(t), ref=f"powderguide {model} h_snow__sde {run} {p['day']}")
-    store.write(data, "powderguide", "hs", r0.date().isoformat(), rows)
-    return n + len(rows)
-
-
-def do_exolabs(net, pts, data, z):
-    plots = [p for p in pg_plots(net, "h_snow__sde") if p["model"] == "exolabs"]
-    if not plots:
-        print("  exolabs: no layer offered today")
-        return 0
-    run = max(p["date"] for p in plots)
-    p = next(p for p in plots if p["date"] == run)
-    lead = int(re.sub(r"\D", "", p["day"]) or 0)
-    t = dt.datetime.strptime(run, "%Y%m%d").replace(tzinfo=UTC) + dt.timedelta(hours=lead)
-    src = p.get("patches") or []
-    path = src[0]["tileUrlPath"] if src else p["tileUrlPath"]
-    v = pg_sample(net, path, "h_snow__sde", pts["lat"], pts["lon"], z) * 100
-    rows = rows_for(pts, v, kind="analysis", unit="cm", valid_from=iso(t), valid_to=iso(t),
-                    ref=f"powderguide exolabs h_snow__sde {run} {p['day']}")
-    store.write(data, "exolabs", "hs", run[:4] + "-" + run[4:6] + "-" + run[6:], rows)
-    return len(rows)
-
-
-# ── snow-forecast.com ───────────────────────────────────────────────────────
-def _num(s):
-    try:
-        return float(s)
-    except (TypeError, ValueError):
-        return None
-
-
-def sf_page(net, resort, level):
-    url = f"{SF}/resorts/{resort}/6day/{level}"
-    s = net.get(url, referer=f"{SF}/resorts/{resort}", cache=False).text
-    out = {"url": url}
-    m = re.search(r'"latitude":\s*([\d.]+)', s), re.search(r'"longitude":\s*([\d.]+)', s)
-    out["lat"], out["lon"] = (_num(m[0].group(1)), _num(m[1].group(1))) if all(m) else (None, None)
-    out["elev"] = {lv: _num(h) for lv, h in re.findall(r'data-forecast-elevation="(\w+)"[^>]*>\s*<span class="height">(\d+)', s)}
-    iss = re.search(r'location-subheader-issued__value"><b>([^<]+)</b>', s)
-    out["issued"] = None
-    if iss:
-        txt = html.unescape(iss.group(1)).replace(" ", " ").strip()
-        for fmt in ("%I %p %d %b %Y", "%I:%M %p %d %b %Y"):
-            try:
-                # issue time is local (Europe/Zurich)
-                out["issued"] = dt.datetime.strptime(txt.replace("pm", "PM").replace("am", "AM"), fmt)
-                break
-            except ValueError:
-                pass
-    # column dates: the day row spans 3 cells each; time row gives the hour of each cell
-    days = re.findall(r'<td class="forecast-table-days__cell[^"]*" colspan="(\d+)"[^>]*data-date="([\d-]+)"', s)
-    cols = [d for span, d in days for _ in range(int(span))]
-    trow = s[s.find('data-row="time"'):]
-    trow = trow[:trow.find("</tr>")]
-    hours = [int(h) for h in re.findall(r'data-hour="(\d+)"', trow)]
-    srow = s[s.find('data-row="snow"'):]
-    srow = srow[:srow.find("</tr>")]
-    cells = re.findall(r'<td class="forecast-table__cell[^"]*">(.*?)</td>', srow, re.S)
-    snow = [_num((re.search(r'data-value="([\d.]+)"', c) or [None, None])[1]) for c in cells]
-    out["snow"] = [(cols[i], hours[i], snow[i]) for i in range(min(len(cols), len(hours), len(snow)))]
-    dep = re.search(r'snow-depths-table__table(.*?)</table>', s, re.S)
-    out["depth"] = {}
-    if dep:
-        for lab, val in re.findall(r'<th>([^<]+)</th><td>(.*?)</td>', dep.group(1)):
-            v = re.search(r'class="snowht">([\d.]+)<', val)
-            out["depth"][lab.strip(" :")] = _num(v.group(1)) if v else None
-    return out
-
-
-def do_snowforecast(net, data, resorts, today):
-    fc, dep = [], []
-    for res in resorts:
-        for level in ("top", "mid", "bot"):
-            try:
-                p = sf_page(net, res, level)
-            except Exception as e:                      # noqa: BLE001
-                print(f"  snowforecast {res}/{level}: {e}", file=sys.stderr)
-                continue
-            if p["lat"] is None:
-                continue
-            elev = p["elev"].get(level)
-            issued = iso(p["issued"].replace(tzinfo=ZURICH)) if p["issued"] else None
-            for d, h, v in p["snow"]:
-                if v is None:
-                    continue
-                t = dt.datetime.fromisoformat(d).replace(hour=h, tzinfo=ZURICH)
-                # each column = the ~6 h around its label hour (AM ~07-13, PM ~13-19, night ~19-07 local)
-                fc.append({"kind": "forecast", "lat": p["lat"], "lon": p["lon"], "elev": elev, "unit": "cm",
-                           "valid_from": iso(t - dt.timedelta(hours=3)), "valid_to": iso(t + dt.timedelta(hours=3)),
-                           "issued": issued, "value": v, "point_id": f"{res}/{level}", "ref": p["url"]})
-            if level == "mid":
-                for lab, lv in (("Top snow depth", "top"), ("Bottom snow depth", "bot")):
-                    v = p["depth"].get(lab)
-                    if v is not None:
-                        dep.append({"kind": "obs", "lat": p["lat"], "lon": p["lon"], "elev": p["elev"].get(lv),
-                                    "unit": "cm", "valid_from": today, "valid_to": today, "value": v,
-                                    "point_id": f"{res}/{lv}", "ref": p["url"] + " (resort report)"})
-    store.write(data, "snowforecast", "snow_period", today, fc)
-    store.write(data, "snowforecast", "hs_reported", today, dep)
-    return len(fc) + len(dep)
-
-
 # ── main ────────────────────────────────────────────────────────────────────
-ALL = ["slf_hn", "slf_hs", "imis", "powderguide", "exolabs", "snowforecast"]
-# PowderGuide's tile server says "Disallow: /" in robots.txt, so powderguide and
-# exolabs are not run by default (and refuse to run while that stays so)
-DEFAULT = ["slf_hn", "slf_hs", "imis", "snowforecast"]
+ALL = ["slf_hn", "slf_hs", "imis"]
+DEFAULT = ["slf_hn", "slf_hs", "imis"]
 
 
 def main():
@@ -407,8 +201,6 @@ def main():
     ap.add_argument("--sources", default=",".join(DEFAULT), help=f"comma list from {ALL}")
     ap.add_argument("--days-back", type=int, default=2, help="SLF maps: today and this many days before")
     ap.add_argument("--grid-km", type=float, default=5.0)
-    ap.add_argument("--zoom", type=int, default=7, help="PowderGuide tile zoom (7 ≈ 0.9 km/pixel here)")
-    ap.add_argument("--resorts", default="config/snowforecast_resorts.txt")
     ap.add_argument("--cache", default=None, help="folder for a local response cache")
     ap.add_argument("--delay", default="2,6", help="min,max seconds between page requests per host")
     a = ap.parse_args()
@@ -434,11 +226,6 @@ def main():
         "slf_hn": lambda: do_slf_hn(net, pts, a.data, days),
         "slf_hs": lambda: do_slf_hs(net, pts, a.data, days),
         "imis": lambda: do_imis(net, stations, a.data),
-        "powderguide": lambda: do_powderguide(net, pts, a.data, a.zoom),
-        "exolabs": lambda: do_exolabs(net, pts, a.data, a.zoom),
-        "snowforecast": lambda: do_snowforecast(
-            net, a.data, [r.strip() for r in Path(a.resorts).read_text().splitlines() if r.strip() and not r.startswith("#")],
-            today.isoformat()),
     }
     failed = []
     for s in src:

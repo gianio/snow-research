@@ -1,16 +1,18 @@
+> **Archiviert (24.11.2026).** Die Validierung der Snowmapper-Modelle zieht in das App-Repo um
+> (SLF-Stationsdaten statt Scraping). PowderGuide- und snow-forecast.com-Code ist entfernt.
+
 # Neuschnee-Vergleich
 
-Vergleicht täglich den Neuschnee eines Modells mit zwei Quellen, Zelle für Zelle über der Schweiz:
+Vergleicht täglich den Neuschnee eines Modells mit der gemessenen SLF-Neuschneekarte, Zelle für Zelle über der Schweiz:
 
 | Quelle | Was | Wie gelesen |
 |---|---|---|
-| PowderGuide | Prognose ICON-EU, Neuschnee (`snow_gsp__lsfwe`), 24 h des nächsten Tages, 1 mm = 1 cm | Farbkacheln (Zoom 6) über die Farbskala zurück in cm |
 | SLF / WhiteRisk | gemessener Neuschnee 24 h (HN1D) bis 06 UTC | codiertes Bild der Seite (Rot = Wert 1–100 cm, Blau = Daten vorhanden) |
 | Modell | Summe der Stundenwerte im selben Zeitraum, nach 24 h Setzung | `data/latest.json` → `snowdata-*.json.gz` der Modell-Seite |
 
 Kennzahlen (1-km-Zellen und 10-km-Blöcke): Bias, MAE, RMSE, Pearson/Spearman, Anteil innerhalb ±2 cm / ±50 %,
 Erkennung ≥1/5/10/20 cm (POD, FAR, CSI, Frequenz-Bias), Klassen-Übereinstimmung, nach Höhe und Region.
-Der Bericht enthält Links, um dieselbe Karte bei PowderGuide und WhiteRisk anzusehen, und den Durchschnitt über alle bisherigen Tage.
+Der Bericht enthält einen Link auf dieselbe Karte bei WhiteRisk und den Durchschnitt über alle bisherigen Tage.
 
 ## Einrichten
 
@@ -31,12 +33,11 @@ pip install -r requirements.txt
 MODEL_SITE=https://… python compare_newsnow.py --out out --history out/history.csv
 ```
 
-Optionen: `--pg-run 20261117`, `--pg-day DAY072` (Standard `auto` = morgen), `--hn-date 2026-11-17`, `--sm-file datei.json.gz`.
+Optionen: `--hn-date 2026-11-17`, `--sm-file datei.json.gz`.
 
 ## Hinweise
 
-- Die Anfragen tragen eine neutrale Kennung; pro Lauf sind es ~5 Anfragen bei PowderGuide und 2 beim SLF.
-- PowderGuide-Kacheln sind für deren Karte gedacht; ein Wechsel auf ICON-EU direkt vom DWD (Open Data) wäre die saubere Alternative.
+- Die Anfragen tragen eine neutrale Kennung; pro Lauf sind es 2 beim SLF.
 - Ein Tag ist Zufall – erst über Wochen wird der Bias belastbar genug zum Kalibrieren.
 
 ---
@@ -51,8 +52,6 @@ Der Workflow *Collect validation data* (07:17 und 18:47 UTC, mit Zufallsverzöge
 | `scrape_snowmaps.py` | SLF/WhiteRisk Neuschneekarte HN1D/HN3D | `slf_hn/hn24`, `hn72` | gemessen, zurück bis `--days-back` |
 | | SLF Schneehöhenkarte (nur mit Variable `SLF_HS_URL`, Vorlage mit `{date}`) | `slf_hs/hs` | gemessen |
 | | SLF IMIS-Stationen (alle ~200) | `imis/hs`, `imis/ta` | gemessen, stündlich (API liefert nur 24 h → 2 Läufe/Tag) |
-| | snow-forecast.com, Orte in `config/snowforecast_resorts.txt` | `snowforecast/snow_period` (Prognose je Tagesdrittel, Berg/Mitte/Tal), `hs_reported` | Prognose + gemeldete Schneehöhe |
-| | PowderGuide ICON-D2/EU, ExoLabs (`--sources powderguide,exolabs`) | `hn24`, `hs` | **aus**: deren Kachel-Server sagt in robots.txt `Disallow: /` |
 | `scrape_gipfelbuch.py` | neue Verhältnisberichte auf gipfelbuch.ch (über die Sitemaps) | `surface_top/bottom`, `snowline_m`, `aper_below_m`, `ski_from_m`, `skidepot_m`, `snow_cm_new/total`, `avalanche_perception`, `rating` | Tourdatum, Koordinate des Routenpunkts |
 | `validate_obs.py` | alles oben gegen die nächste Modellzelle | Bias, MAE, RMSE, r, POD/FAR | |
 
@@ -72,7 +71,7 @@ Der Login-Ablauf ist ohne Konto noch ungetestet: wenn er scheitert, meldet das S
 ### Unauffällig, aber anständig
 `snowval/net.py`: ein normaler Browser-Kopf (pro Lauf einer), Cookies, Referer der Seite, keine Angaben zu dir,
 zufällige Pausen (Seiten 2–8 s, Kacheln kürzer), Cache, Rückzug bei 429/5xx. Bewusst **nicht**: IP-/Proxy-Rotation,
-Captcha-Lösen, Sperren umgehen, robots.txt ignorieren. Pro Lauf ~25 Anfragen an SLF, ~60 an snow-forecast.com,
+Captcha-Lösen, Sperren umgehen, robots.txt ignorieren. Pro Lauf ~25 Anfragen an SLF
 und bei gipfelbuch.ch die Sitemaps plus eine pro neuem Bericht.
 
 ### Einrichten

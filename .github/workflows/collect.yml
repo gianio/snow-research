@@ -1,5 +1,5 @@
 # Collects validation data twice a day and keeps it on the branch «data»:
-#   data/obs/<source>/<var>/<day>.csv.gz   point values (SLF maps, IMIS, snow-forecast.com, gipfelbuch)
+#   data/obs/<source>/<var>/<day>.csv.gz   point values (SLF maps, IMIS, gipfelbuch)
 #   data/gipfelbuch/reports_<month>.jsonl  the parsed gipfelbuch reports
 # IMIS only offers the last 24 h, so the twice-daily run is what builds its history.
 name: Collect validation data
